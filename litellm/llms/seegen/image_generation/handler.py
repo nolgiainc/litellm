@@ -2,29 +2,34 @@ from __future__ import annotations
 
 from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Final, assert_never
 
 import httpx
 
 import litellm
 from litellm.exceptions import Timeout
-from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
     HTTPHandler,
-    _get_httpx_client,  # pyright: ignore[reportPrivateUsage]  # shared cached-client factory has no public alias
-    get_async_httpx_client,
+    _get_httpx_client,  # pyright: ignore[reportPrivateUsage, reportUnknownVariableType]  # cached factory exposes legacy untyped params
+    get_async_httpx_client,  # pyright: ignore[reportUnknownVariableType]  # cached factory exposes legacy untyped params
 )
 from litellm.types.utils import ImageResponse
 
 from ..common_utils import (
     DEFAULT_MAX_POLLING_TIME,
     DEFAULT_POLLING_INTERVAL,
+    EMPTY_HEADERS,
+    EMPTY_JSON_OBJECT,
     AsyncHTTPClient,
     JsonValue,
     SeeGenError,
+    SeeGenImageLogger,
     SyncHTTPClient,
     error_from_http_response,
+    parse_headers,
+    parse_json_mapping,
     parse_submitted_task,
 )
 from .parameters import SeeGenModelFamily, seegen_model_family
@@ -53,9 +58,9 @@ class SeeGenImageGeneration:
         model: str,
         prompt: str,
         model_response: ImageResponse,
-        optional_params: dict[str, JsonValue],
+        optional_params: Mapping[str, JsonValue],
         litellm_params: Mapping[str, JsonValue],
-        logging_obj: LiteLLMLoggingObj,
+        logging_obj: SeeGenImageLogger,
         timeout: float | httpx.Timeout | None,
         extra_headers: Mapping[str, str] | None = None,
         client: HTTPHandler | AsyncHTTPHandler | None = None,
@@ -96,9 +101,9 @@ class SeeGenImageGeneration:
             raw_response=final_response,
             model_response=model_response,
             logging_obj=logging_obj,
-            request_data=dict(submit_request.data),
+            request_data=parse_json_mapping(submit_request.data),
             optional_params=optional_params,
-            litellm_params={},
+            litellm_params=EMPTY_JSON_OBJECT,
             encoding=None,
         )
         return (
@@ -112,9 +117,9 @@ class SeeGenImageGeneration:
         model: str,
         prompt: str,
         model_response: ImageResponse,
-        optional_params: dict[str, JsonValue],
+        optional_params: Mapping[str, JsonValue],
         litellm_params: Mapping[str, JsonValue],
-        logging_obj: LiteLLMLoggingObj,
+        logging_obj: SeeGenImageLogger,
         timeout: float | httpx.Timeout | None,
         extra_headers: Mapping[str, str] | None = None,
         client: AsyncHTTPHandler | None = None,
@@ -142,9 +147,9 @@ class SeeGenImageGeneration:
             raw_response=final_response,
             model_response=model_response,
             logging_obj=logging_obj,
-            request_data=dict(submit_request.data),
+            request_data=parse_json_mapping(submit_request.data),
             optional_params=optional_params,
-            litellm_params={},
+            litellm_params=EMPTY_JSON_OBJECT,
             encoding=None,
         )
         return (
@@ -157,9 +162,9 @@ class SeeGenImageGeneration:
         self,
         model: str,
         prompt: str,
-        optional_params: dict[str, JsonValue],
+        optional_params: Mapping[str, JsonValue],
         litellm_params: Mapping[str, JsonValue],
-        logging_obj: LiteLLMLoggingObj,
+        logging_obj: SeeGenImageLogger,
         timeout: float | httpx.Timeout | None,
         extra_headers: Mapping[str, str] | None,
     ) -> _SubmitRequest:
@@ -168,15 +173,17 @@ class SeeGenImageGeneration:
         drop_params_value: Final = litellm_params.get("drop_params")
         api_key: Final = api_key_value if isinstance(api_key_value, str) else None
         api_base: Final = api_base_value if isinstance(api_base_value, str) else None
-        transform_litellm_params: Final[dict[str, JsonValue]] = (
-            {"drop_params": drop_params_value} if isinstance(drop_params_value, bool) else {}
+        transform_litellm_params: Final[Mapping[str, JsonValue]] = (
+            MappingProxyType({"drop_params": drop_params_value})
+            if isinstance(drop_params_value, bool)
+            else EMPTY_JSON_OBJECT
         )
         headers: Final = self.config.validate_environment(
-            headers=dict(extra_headers or {}),
+            headers=extra_headers or EMPTY_HEADERS,
             model=model,
-            messages=[],
+            messages=(),
             optional_params=optional_params,
-            litellm_params={},
+            litellm_params=EMPTY_JSON_OBJECT,
             api_key=api_key,
         )
         url: Final = self.config.get_complete_url(
@@ -184,7 +191,7 @@ class SeeGenImageGeneration:
             api_key=api_key,
             model=model,
             optional_params=optional_params,
-            litellm_params={},
+            litellm_params=EMPTY_JSON_OBJECT,
         )
         data: Final = self.config.transform_image_generation_request(
             model=model,
@@ -196,7 +203,9 @@ class SeeGenImageGeneration:
         logging_obj.pre_call(
             input=prompt,
             api_key="",
-            additional_args={"complete_input_dict": data, "api_base": url, "headers": headers},
+            additional_args=parse_json_mapping(
+                MappingProxyType({"complete_input_dict": data, "api_base": url, "headers": headers})
+            ),
         )
         return _SubmitRequest(model=model, url=url, headers=headers, data=data, timeout=timeout)
 
@@ -204,8 +213,8 @@ class SeeGenImageGeneration:
         try:
             response: Final = client.post(
                 url=request.url,
-                headers=dict(request.headers),
-                json=dict(request.data),
+                headers=parse_headers(request.headers),
+                json=parse_json_mapping(request.data),
                 timeout=request.timeout,
             )
         except httpx.HTTPStatusError as exc:
@@ -220,8 +229,8 @@ class SeeGenImageGeneration:
         try:
             response: Final = await client.post(
                 url=request.url,
-                headers=dict(request.headers),
-                json=dict(request.data),
+                headers=parse_headers(request.headers),
+                json=parse_json_mapping(request.data),
                 timeout=request.timeout,
             )
         except httpx.HTTPStatusError as exc:

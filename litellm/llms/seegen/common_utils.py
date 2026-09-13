@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final, Literal, Protocol, TypeVar, assert_never
 
 import httpx
@@ -6,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, Valid
 
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 
-_JsonInputT = TypeVar("_JsonInputT")
+_JsonInputT: Final = TypeVar("_JsonInputT")
 
 DEFAULT_API_BASE: Final = "https://api.seegen.ai"
 IMAGE_GENERATION_PATH: Final = "/v1/images/generations"
@@ -23,7 +24,7 @@ class SyncHTTPClient(Protocol):
         self,
         url: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,  # mutable-ok: HTTPHandler protocol requires dict headers
         timeout: float | httpx.Timeout | None = None,
     ) -> httpx.Response: ...
 
@@ -31,8 +32,8 @@ class SyncHTTPClient(Protocol):
         self,
         url: str,
         *,
-        json: dict[str, JsonValue],
-        headers: dict[str, str] | None = None,
+        json: dict[str, JsonValue],  # mutable-ok: HTTPHandler protocol requires a dict JSON body
+        headers: dict[str, str] | None = None,  # mutable-ok: HTTPHandler protocol requires dict headers
         timeout: float | httpx.Timeout | None = None,
     ) -> httpx.Response: ...
 
@@ -42,7 +43,7 @@ class AsyncHTTPClient(Protocol):
         self,
         url: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,  # mutable-ok: HTTPHandler protocol requires dict headers
         timeout: float | httpx.Timeout | None = None,
     ) -> httpx.Response: ...
 
@@ -50,10 +51,20 @@ class AsyncHTTPClient(Protocol):
         self,
         url: str,
         *,
-        json: dict[str, JsonValue],
-        headers: dict[str, str] | None = None,
+        json: dict[str, JsonValue],  # mutable-ok: HTTPHandler protocol requires a dict JSON body
+        headers: dict[str, str] | None = None,  # mutable-ok: HTTPHandler protocol requires dict headers
         timeout: float | httpx.Timeout | None = None,
     ) -> httpx.Response: ...
+
+
+class SeeGenImageLogger(Protocol):
+    def pre_call(
+        self,
+        input: str,
+        api_key: str,
+        model: str | None = None,
+        additional_args: Mapping[str, JsonValue] = ...,
+    ) -> None: ...
 
 
 class SeeGenGatewayError(BaseModel):
@@ -133,11 +144,22 @@ class SeeGenPolledTask(BaseModel):
 _ERROR_ADAPTER: Final[TypeAdapter[SeeGenGatewayError | SeeGenOfficialError]] = TypeAdapter(
     SeeGenGatewayError | SeeGenOfficialError
 )
-_JSON_MAPPING_ADAPTER: Final[TypeAdapter[dict[str, JsonValue]]] = TypeAdapter(dict[str, JsonValue])
+EMPTY_JSON_OBJECT: Final[Mapping[str, JsonValue]] = MappingProxyType({})
+EMPTY_HEADERS: Final[Mapping[str, str]] = MappingProxyType({})
+_JSON_MAPPING_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
+_HEADERS_ADAPTER: Final = TypeAdapter(dict[str, str])
 
 
-def parse_json_mapping(value: Mapping[str, _JsonInputT]) -> dict[str, JsonValue]:
+def parse_json_mapping(
+    value: Mapping[str, _JsonInputT],
+) -> dict[str, JsonValue]:  # mutable-ok: validated JSON boundary must return a serializer-compatible dict
     return _JSON_MAPPING_ADAPTER.validate_python(value)
+
+
+def parse_headers(
+    value: Mapping[str, str] | httpx.Headers,
+) -> dict[str, str]:  # mutable-ok: HTTPHandler requires concrete dict headers
+    return _HEADERS_ADAPTER.validate_python(value)
 
 
 def _error_message(error: SeeGenGatewayError | SeeGenOfficialError) -> str:
@@ -156,20 +178,22 @@ def error_from_response(
     payload: Mapping[str, JsonValue],
     headers: Mapping[str, str] | httpx.Headers,
 ) -> SeeGenError:
+    parsed_headers: Final = parse_headers(headers)
+    parsed_payload: Final = parse_json_mapping(payload)
     try:
-        parsed: Final = _ERROR_ADAPTER.validate_python(dict(payload))
+        parsed: Final = _ERROR_ADAPTER.validate_python(payload)
         return SeeGenError(
             status_code=status_code,
             message=_error_message(parsed),
-            headers=dict(headers),
-            body=dict(payload),
+            headers=parsed_headers,
+            body=parsed_payload,
         )
     except ValidationError:
         return SeeGenError(
             status_code=status_code,
-            message=str(dict(payload)),
-            headers=dict(headers),
-            body=dict(payload),
+            message=str(parsed_payload),
+            headers=parsed_headers,
+            body=parsed_payload,
         )
 
 

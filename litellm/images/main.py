@@ -3,6 +3,7 @@ import contextvars
 import importlib
 from collections.abc import Coroutine
 from functools import partial
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, Optional, cast, overload
 
 if TYPE_CHECKING:
@@ -430,11 +431,13 @@ def image_generation(
             )
         elif custom_llm_provider == "seegen":
             seegen_optional_params: Final = parse_json_mapping(optional_params)
-            seegen_litellm_params: Final = {
-                **litellm_params_dict,
-                "api_key": api_key or dynamic_api_key,
-                "api_base": api_base,
-            }
+            seegen_litellm_params: Final = MappingProxyType(
+                {
+                    **litellm_params_dict,
+                    "api_key": api_key or dynamic_api_key,
+                    "api_base": api_base,
+                }
+            )
             return seegen_image_generation.image_generation(
                 model=model,
                 prompt=prompt,

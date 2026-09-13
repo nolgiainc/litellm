@@ -1,8 +1,8 @@
 from .handler import SeeGenImageGeneration, seegen_image_generation
 from .transformation import SeeGenImageGenerationConfig
 
-__all__ = [
+__all__ = (
     "SeeGenImageGeneration",
     "SeeGenImageGenerationConfig",
     "seegen_image_generation",
-]
+)

@@ -64,7 +64,7 @@ def model_name(model: str) -> str:
 
 
 def video_family(model: str) -> SeeGenVideoFamily:
-    normalized = model_name(model)
+    normalized: Final = model_name(model)
     if normalized in SEEDANCE_MODELS:
         return SeeGenVideoFamily.SEEDANCE
     if normalized.endswith("-t2v") and normalized in HAPPYHORSE_MODELS:

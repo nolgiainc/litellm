@@ -9138,6 +9138,25 @@ class ProviderConfigManager:
         return None
 
     @staticmethod
+    def _get_topaz_or_seegen_video_config(
+        model: str | None,
+        provider: LlmProviders,
+    ) -> BaseVideoConfig | None:
+        if provider == LlmProviders.TOPAZ:
+            from litellm.llms.topaz.videos.transformation import TopazVideoConfig
+
+            return TopazVideoConfig()
+        if model is not None and "seedance" in model:
+            from litellm.llms.seegen.videos import SeeGenSeedanceVideoConfig
+
+            return SeeGenSeedanceVideoConfig(model)
+        if model is not None and (model.startswith("happyhorse") or "wan3.0" in model):
+            from litellm.llms.seegen.videos import SeeGenDashScopeVideoConfig
+
+            return SeeGenDashScopeVideoConfig(model)
+        return None
+
+    @staticmethod
     def get_provider_video_config(
         model: str | None,
         provider: LlmProviders,
@@ -9196,19 +9215,8 @@ class ProviderConfigManager:
             from litellm.llms.minimax.videos.transformation import MinimaxVideoConfig
 
             return MinimaxVideoConfig()
-        elif LlmProviders.TOPAZ == provider:
-            from litellm.llms.topaz.videos.transformation import TopazVideoConfig
-
-            return TopazVideoConfig()
-        elif LlmProviders.SEEGEN == provider:
-            if model is not None and "seedance" in model:
-                from litellm.llms.seegen.videos import SeeGenSeedanceVideoConfig
-
-                return SeeGenSeedanceVideoConfig(model)
-            if model is not None and (model.startswith("happyhorse") or "wan3.0" in model):
-                from litellm.llms.seegen.videos import SeeGenDashScopeVideoConfig
-
-                return SeeGenDashScopeVideoConfig(model)
+        elif provider in (LlmProviders.TOPAZ, LlmProviders.SEEGEN):
+            return ProviderConfigManager._get_topaz_or_seegen_video_config(model, provider)
         elif LlmProviders.HOSTED_VLLM == provider:
             from litellm.llms.hosted_vllm.videos import get_hosted_vllm_video_config
 

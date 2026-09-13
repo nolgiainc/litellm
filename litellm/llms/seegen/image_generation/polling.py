@@ -13,6 +13,7 @@ from ..common_utils import (
     SeeGenError,
     SyncHTTPClient,
     error_from_http_response,
+    parse_headers,
     parse_polled_task,
 )
 
@@ -50,7 +51,7 @@ class SeeGenPoller:
         deadline: float,
     ) -> Iterator[httpx.Response]:
         while time.monotonic() < deadline:
-            yield client.get(url=request.url, headers=dict(request.headers), timeout=request.timeout)
+            yield client.get(url=request.url, headers=parse_headers(request.headers), timeout=request.timeout)
             time.sleep(self.interval)
 
     async def _async_responses(
@@ -60,7 +61,7 @@ class SeeGenPoller:
         deadline: float,
     ) -> AsyncIterator[httpx.Response]:
         while time.monotonic() < deadline:
-            yield await client.get(url=request.url, headers=dict(request.headers), timeout=request.timeout)
+            yield await client.get(url=request.url, headers=parse_headers(request.headers), timeout=request.timeout)
             await anyio.sleep(self.interval)
 
     @staticmethod

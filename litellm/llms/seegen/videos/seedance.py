@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Final, Literal
+from types import MappingProxyType
+from typing import Final, Literal
 
 import httpx
 from httpx._types import RequestFiles
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
 from litellm.types.videos.utils import encode_video_id_with_provider
 from litellm.videos.capabilities import CapabilityParamSupport, DeclaredCapabilityParams
 
-from ..common_utils import JsonValue, SeeGenError, parse_json_mapping
+from ..common_utils import EMPTY_JSON_OBJECT, JsonValue, SeeGenError, parse_json_mapping
 from .base import SeeGenVideoConfig
 from .models import model_name, video_family
 from .seedance_parameters import (
@@ -23,12 +25,10 @@ from .seedance_parameters import (
     media_urls,
 )
 
-if TYPE_CHECKING:
-    from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
-else:
-    LiteLLMLoggingObj = Any
-
 _CREATE_PATH: Final = "/v1/contents/generations/tasks"
+_STRING_LIST_ADAPTER: Final = TypeAdapter(list[str])
+_JSON_LIST_ADAPTER: Final = TypeAdapter(list[JsonValue])
+_EMPTY_REQUEST_FILES: Final = TypeAdapter(list[tuple[str, str]]).validate_python(())
 
 
 class _VideoURL(BaseModel):
@@ -64,6 +64,12 @@ class _SubmitResponse(BaseModel):
     status: str | None = None
 
 
+class _TaskError(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    message: str | None = None
+
+
 class _TaskResponse(BaseModel):
     model_config = ConfigDict(frozen=True, extra="ignore")
 
@@ -73,7 +79,7 @@ class _TaskResponse(BaseModel):
     usage: _Usage | None = None
     message: str | None = None
     failure_reason: str | None = None
-    error: str | dict[str, JsonValue] | None = None
+    error: str | _TaskError | None = None
 
 
 def _failure_message(task: _TaskResponse) -> str:
@@ -83,17 +89,17 @@ def _failure_message(task: _TaskResponse) -> str:
         return task.message
     if isinstance(task.error, str) and task.error:
         return task.error
-    if isinstance(task.error, dict):
-        message = task.error.get("message")
-        if isinstance(message, str) and message:
+    if isinstance(task.error, _TaskError):
+        message: Final = task.error.message
+        if message:
             return message
     return f"Seedance task ended with status {task.status}"
 
 
 class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
-    def get_supported_openai_params(self, model: str) -> list[str]:
+    def get_supported_openai_params(self, model: str) -> list[str]:  # mutable-ok: BaseVideoConfig requires a list
         video_family(model)
-        return list(SUPPORTED_PARAMS | IGNORED_STANDARD_PARAMS)
+        return _STRING_LIST_ADAPTER.validate_python(SUPPORTED_PARAMS | IGNORED_STANDARD_PARAMS)
 
     def get_capability_param_support(self, model: str) -> CapabilityParamSupport:
         video_family(model)
@@ -104,42 +110,92 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
         video_create_optional_params: VideoCreateOptionalRequestParams,
         model: str,
         drop_params: bool,
-    ) -> dict[str, JsonValue]:
-        return map_seedance_params(video_create_optional_params, model, drop_params)
+    ) -> dict[str, JsonValue]:  # mutable-ok: BaseVideoConfig requires a dict
+        return parse_json_mapping(map_seedance_params(video_create_optional_params, model, drop_params))
 
     def transform_video_create_request(
         self,
         model: str,
         prompt: str,
         api_base: str,
-        video_create_optional_request_params: dict[str, JsonValue],
+        video_create_optional_request_params: Mapping[str, JsonValue],
         litellm_params: GenericLiteLLMParams,
-        headers: dict[str, str],
-    ) -> tuple[dict[str, JsonValue], RequestFiles, str]:
+        headers: Mapping[str, str],
+    ) -> tuple[dict[str, JsonValue], RequestFiles, str]:  # mutable-ok: BaseVideoConfig requires a dict body
         params: Final = parse_json_mapping(video_create_optional_request_params)
-        content: Final[list[JsonValue]] = [{"type": "text", "text": prompt}]
+        text_content: Final = parse_json_mapping(MappingProxyType({"type": "text", "text": prompt}))
         image_roles: Final = (
-            (params.pop("image_url", None), "first_frame"),
-            (params.pop("end_image_url", None), "last_frame"),
+            (params.get("image_url"), "first_frame"),
+            (params.get("end_image_url"), "last_frame"),
         )
-        for value, role in image_roles:
-            for url in media_urls(value, role):
-                content.append({"type": "image_url", "image_url": {"url": url}, "role": role})
-        for key in ("input_reference", "image_urls"):
-            for url in media_urls(params.pop(key, None), key):
-                content.append({"type": "image_url", "image_url": {"url": url}, "role": "reference_image"})
-        for url in media_urls(params.pop("video_urls", None), "video_urls"):
-            content.append({"type": "video_url", "video_url": {"url": url}, "role": "reference_video"})
-        for url in media_urls(params.pop("audio_urls", None), "audio_urls"):
-            content.append({"type": "audio_url", "audio_url": {"url": url}, "role": "reference_audio"})
-        request_data: Final = parse_json_mapping(
+        image_content: Final = tuple(
+            parse_json_mapping(
+                MappingProxyType(
+                    {
+                        "type": "image_url",
+                        "image_url": parse_json_mapping(MappingProxyType({"url": url})),
+                        "role": role,
+                    }
+                )
+            )
+            for value, role in image_roles
+            for url in media_urls(value, role)
+        )
+        reference_keys: Final = ("input_reference", "image_urls")
+        reference_content: Final = tuple(
+            parse_json_mapping(
+                MappingProxyType(
+                    {
+                        "type": "image_url",
+                        "image_url": parse_json_mapping(MappingProxyType({"url": url})),
+                        "role": "reference_image",
+                    }
+                )
+            )
+            for key in reference_keys
+            for url in media_urls(params.get(key), key)
+        )
+        video_content: Final = tuple(
+            parse_json_mapping(
+                MappingProxyType(
+                    {
+                        "type": "video_url",
+                        "video_url": parse_json_mapping(MappingProxyType({"url": url})),
+                        "role": "reference_video",
+                    }
+                )
+            )
+            for url in media_urls(params.get("video_urls"), "video_urls")
+        )
+        audio_content: Final = tuple(
+            parse_json_mapping(
+                MappingProxyType(
+                    {
+                        "type": "audio_url",
+                        "audio_url": parse_json_mapping(MappingProxyType({"url": url})),
+                        "role": "reference_audio",
+                    }
+                )
+            )
+            for url in media_urls(params.get("audio_urls"), "audio_urls")
+        )
+        content: Final = _JSON_LIST_ADAPTER.validate_python(
+            (text_content, *image_content, *reference_content, *video_content, *audio_content)
+        )
+        media_keys: Final = frozenset(
+            {"image_url", "end_image_url", "input_reference", "image_urls", "video_urls", "audio_urls"}
+        )
+        forwarded: Final[Mapping[str, JsonValue]] = MappingProxyType(
             {
-                "model": model_name(model),
-                "content": content,
-                **{key: value for key, value in params.items() if key not in IGNORED_STANDARD_PARAMS},
+                key: value
+                for key, value in params.items()
+                if key not in IGNORED_STANDARD_PARAMS and key not in media_keys
             }
         )
-        return request_data, [], f"{api_base.rstrip('/')}{_CREATE_PATH}"
+        request_data: Final = parse_json_mapping(
+            MappingProxyType({"model": model_name(model), "content": content, **forwarded})
+        )
+        return request_data, _EMPTY_REQUEST_FILES, f"{api_base.rstrip('/')}{_CREATE_PATH}"
 
     def transform_video_create_response(
         self,
@@ -147,7 +203,7 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
         raw_response: httpx.Response,
         logging_obj: LiteLLMLoggingObj,
         custom_llm_provider: str | None = None,
-        request_data: dict[str, JsonValue] | None = None,
+        request_data: Mapping[str, JsonValue] | None = None,
     ) -> VideoObject:
         payload: Final = self._json_response(raw_response)
         try:
@@ -157,16 +213,25 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
         self._model = model_name(model)
         raw_status: Final = submitted.status
         status: Final = (
-            "queued" if raw_status is None else "processing" if raw_status in {"queued", "running"} else raw_status
+            "queued"
+            if raw_status is None
+            else "processing"
+            if raw_status in frozenset({"queued", "running"})
+            else raw_status
         )
-        usage: Final[dict[str, float | str]] = {}
-        if request_data is not None:
-            duration = request_data.get("duration")
-            resolution = request_data.get("resolution")
-            if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0:
-                usage["duration_seconds"] = float(duration)
-            if isinstance(resolution, str):
-                usage["video_resolution"] = resolution.lower()
+        duration: Final = request_data.get("duration") if request_data is not None else None
+        resolution: Final = request_data.get("resolution") if request_data is not None else None
+        duration_usage: Final[Mapping[str, JsonValue]] = (
+            MappingProxyType({"duration_seconds": float(duration)})
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0
+            else EMPTY_JSON_OBJECT
+        )
+        resolution_usage: Final[Mapping[str, JsonValue]] = (
+            MappingProxyType({"video_resolution": resolution.lower()})
+            if isinstance(resolution, str)
+            else EMPTY_JSON_OBJECT
+        )
+        usage: Final = parse_json_mapping(MappingProxyType({**duration_usage, **resolution_usage}))
         video_id: Final = (
             encode_video_id_with_provider(submitted.id, custom_llm_provider, self._model)
             if custom_llm_provider
@@ -185,10 +250,13 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
         video_id: str,
         api_base: str,
         litellm_params: GenericLiteLLMParams,
-        headers: dict[str, str],
-    ) -> tuple[str, dict[str, JsonValue]]:
+        headers: Mapping[str, str],
+    ) -> tuple[str, dict[str, JsonValue]]:  # mutable-ok: BaseVideoConfig requires a dict query
         task_id: Final = self._remember_video_model(video_id)
-        return f"{api_base.rstrip('/')}{_CREATE_PATH}/{self._encoded_task_id(task_id)}", {}
+        return (
+            f"{api_base.rstrip('/')}{_CREATE_PATH}/{self._encoded_task_id(task_id)}",
+            parse_json_mapping(EMPTY_JSON_OBJECT),
+        )
 
     def transform_video_status_retrieve_response(
         self,
@@ -199,33 +267,45 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
         task: Final = self._parse_task(raw_response)
         status: Final = (
             "processing"
-            if task.status in {"queued", "running"}
+            if task.status in frozenset({"queued", "running"})
             else "completed"
             if task.status == "succeeded"
             else "failed"
         )
-        error: Final = {"code": task.status, "message": _failure_message(task)} if status == "failed" else None
+        error: Final[Mapping[str, JsonValue] | None] = (
+            MappingProxyType({"code": task.status, "message": _failure_message(task)}) if status == "failed" else None
+        )
         usage: Final = (
-            {
-                "completion_tokens": task.usage.completion_tokens,
-                "total_tokens": task.usage.total_tokens,
-            }
+            parse_json_mapping(
+                MappingProxyType(
+                    {
+                        "completion_tokens": task.usage.completion_tokens,
+                        "total_tokens": task.usage.total_tokens,
+                    }
+                )
+            )
             if task.usage is not None
-            else {}
+            else parse_json_mapping(EMPTY_JSON_OBJECT)
         )
         video_id: Final = (
             encode_video_id_with_provider(task.id, custom_llm_provider, self._model) if custom_llm_provider else task.id
         )
-        return VideoObject(id=video_id, object="video", status=status, error=error, usage=usage)
+        return VideoObject(
+            id=video_id,
+            object="video",
+            status=status,
+            error=parse_json_mapping(error) if error is not None else None,
+            usage=usage,
+        )
 
     def transform_video_content_request(
         self,
         video_id: str,
         api_base: str,
         litellm_params: GenericLiteLLMParams,
-        headers: dict[str, str],
+        headers: Mapping[str, str],
         variant: str | None = None,
-    ) -> tuple[str, dict[str, JsonValue]]:
+    ) -> tuple[str, dict[str, JsonValue]]:  # mutable-ok: BaseVideoConfig requires a dict query
         return self.transform_video_status_retrieve_request(video_id, api_base, litellm_params, headers)
 
     def _extract_video_url(self, payload: Mapping[str, JsonValue]) -> str:
@@ -251,11 +331,14 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
         video_id: str,
         api_base: str,
         litellm_params: GenericLiteLLMParams,
-        headers: dict[str, str],
-    ) -> tuple[str, dict[str, JsonValue]]:
+        headers: Mapping[str, str],
+    ) -> tuple[str, dict[str, JsonValue]]:  # mutable-ok: BaseVideoConfig requires a dict body
         task_id: Final = self._remember_video_model(video_id)
         self._requested_video_id = task_id
-        return f"{api_base.rstrip('/')}{_CREATE_PATH}/{self._encoded_task_id(task_id)}", {}
+        return (
+            f"{api_base.rstrip('/')}{_CREATE_PATH}/{self._encoded_task_id(task_id)}",
+            parse_json_mapping(EMPTY_JSON_OBJECT),
+        )
 
     def transform_video_delete_response(
         self,

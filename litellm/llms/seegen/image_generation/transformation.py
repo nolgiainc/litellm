@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, assert_never
 from uuid import uuid4
 
 import httpx
+from pydantic import TypeAdapter
 
-from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.llms.base_llm.image_generation.transformation import BaseImageGenerationConfig
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import AllMessageValues, OpenAIImageGenerationOptionalParams
@@ -18,10 +19,16 @@ from ..common_utils import (
     JsonValue,
     SeeGenError,
     SeeGenGptUsage,
+    SeeGenImageLogger,
     SeeGenUsage,
     error_from_response,
+    parse_headers,
+    parse_json_mapping,
     parse_polled_task,
 )
+
+_OPENAI_PARAMS_LIST_ADAPTER: Final = TypeAdapter(list[OpenAIImageGenerationOptionalParams])
+_IMAGE_OBJECT_LIST_ADAPTER: Final = TypeAdapter(list[ImageObject])
 
 if TYPE_CHECKING:
     import tiktoken
@@ -75,8 +82,10 @@ def _image_usage(usage: SeeGenUsage | SeeGenGptUsage | None) -> ImageUsage:
 
 
 class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
-    def get_supported_openai_params(self, model: str) -> list[OpenAIImageGenerationOptionalParams]:
-        return list(supported_openai_params(model))
+    def get_supported_openai_params(
+        self, model: str
+    ) -> list[OpenAIImageGenerationOptionalParams]:  # mutable-ok: BaseImageGenerationConfig requires a list
+        return _OPENAI_PARAMS_LIST_ADAPTER.validate_python(supported_openai_params(model))
 
     def map_openai_params(
         self,
@@ -84,19 +93,19 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
         optional_params: Mapping[str, JsonValue],
         model: str,
         drop_params: bool,
-    ) -> dict[str, JsonValue]:
-        return map_openai_params(non_default_params, optional_params, model, drop_params)
+    ) -> dict[str, JsonValue]:  # mutable-ok: BaseImageGenerationConfig requires a dict
+        return parse_json_mapping(map_openai_params(non_default_params, optional_params, model, drop_params))
 
     def validate_environment(
         self,
-        headers: dict[str, str],
+        headers: Mapping[str, str],
         model: str,
-        messages: list[AllMessageValues],
-        optional_params: dict[str, JsonValue],
-        litellm_params: dict[str, JsonValue],
+        messages: Sequence[AllMessageValues],
+        optional_params: Mapping[str, JsonValue],
+        litellm_params: Mapping[str, JsonValue],
         api_key: str | None = None,
         api_base: str | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, str]:  # mutable-ok: BaseImageGenerationConfig requires concrete dict headers
         resolved_key: Final = api_key or get_secret_str("SEEGEN_API_KEY")
         if not resolved_key:
             raise SeeGenError(status_code=401, message="SEEGEN_API_KEY is not set")
@@ -107,17 +116,25 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
                     (value for key, value in headers.items() if key.lower() == "idempotency-key"),
                     None,
                 )
-                request_headers: Final = {
-                    key: value for key, value in headers.items() if key.lower() != "idempotency-key"
-                }
-                return {
-                    **request_headers,
-                    "Authorization": f"Bearer {resolved_key}",
-                    "Content-Type": "application/json",
-                    "Idempotency-Key": provided_key or str(uuid4()),
-                }
+                request_headers: Final = MappingProxyType(
+                    {key: value for key, value in headers.items() if key.lower() != "idempotency-key"}
+                )
+                return parse_headers(
+                    MappingProxyType(
+                        {
+                            **request_headers,
+                            "Authorization": f"Bearer {resolved_key}",
+                            "Content-Type": "application/json",
+                            "Idempotency-Key": provided_key or str(uuid4()),
+                        }
+                    )
+                )
             case SeeGenModelFamily.SEEDREAM | SeeGenModelFamily.NANO_BANANA:
-                return {**headers, "Authorization": f"Bearer {resolved_key}", "Content-Type": "application/json"}
+                return parse_headers(
+                    MappingProxyType(
+                        {**headers, "Authorization": f"Bearer {resolved_key}", "Content-Type": "application/json"}
+                    )
+                )
             case unreachable:  # pyright: ignore[reportUnnecessaryComparison]  # exhaustive variant sentinel
                 assert_never(unreachable)
 
@@ -126,8 +143,8 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
         api_base: str | None,
         api_key: str | None,
         model: str,
-        optional_params: dict[str, JsonValue],
-        litellm_params: dict[str, JsonValue],
+        optional_params: Mapping[str, JsonValue],
+        litellm_params: Mapping[str, JsonValue],
         stream: bool | None = None,
     ) -> str:
         base_url: Final = (api_base or get_secret_str("SEEGEN_API_BASE") or DEFAULT_API_BASE).rstrip("/")
@@ -137,10 +154,10 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
         self,
         model: str,
         prompt: str,
-        optional_params: dict[str, JsonValue],
-        litellm_params: dict[str, JsonValue],
-        headers: dict[str, str],
-    ) -> dict[str, JsonValue]:
+        optional_params: Mapping[str, JsonValue],
+        litellm_params: Mapping[str, JsonValue],
+        headers: Mapping[str, str],
+    ) -> dict[str, JsonValue]:  # mutable-ok: BaseImageGenerationConfig requires a dict
         model_name: Final = seegen_model_name(model)
         family: Final = seegen_model_family(model)
         drop_params: Final = litellm_params.get("drop_params") is True
@@ -150,26 +167,30 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
                 unsupported: Final = tuple(key for key in optional_params if key not in supported)
                 if unsupported and not drop_params:
                     raise SeeGenError(status_code=400, message=f"Unsupported parameters for {model}: {unsupported}")
-                forwarded: Final = {
-                    key: value
-                    for key, value in optional_params.items()
-                    if key in supported and key not in {"response_format", "watermark", "size"}
-                }
-                return {
-                    "model": model_name,
-                    "prompt": prompt,
-                    **forwarded,
-                    "size": optional_params.get("size", "2048x2048"),
-                    "response_format": "url",
-                    "watermark": False,
-                }
+                ignored: Final = frozenset({"response_format", "watermark", "size"})
+                forwarded: Final = MappingProxyType(
+                    {key: value for key, value in optional_params.items() if key in supported and key not in ignored}
+                )
+                return parse_json_mapping(
+                    MappingProxyType(
+                        {
+                            "model": model_name,
+                            "prompt": prompt,
+                            **forwarded,
+                            "size": optional_params.get("size", "2048x2048"),
+                            "response_format": "url",
+                            "watermark": False,
+                        }
+                    )
+                )
             case SeeGenModelFamily.GPT_IMAGE:
-                gpt_forwarded: Final = {
-                    key: value
-                    for key, value in optional_params.items()
-                    if key not in {"response_format", "stream", "partial_images"}
-                }
-                return {"model": model_name, "prompt": prompt, **gpt_forwarded, "response_format": "url"}
+                gpt_ignored: Final = frozenset({"response_format", "stream", "partial_images"})
+                gpt_forwarded: Final = MappingProxyType(
+                    {key: value for key, value in optional_params.items() if key not in gpt_ignored}
+                )
+                return parse_json_mapping(
+                    MappingProxyType({"model": model_name, "prompt": prompt, **gpt_forwarded, "response_format": "url"})
+                )
             case SeeGenModelFamily.NANO_BANANA:
                 nano_supported: Final = frozenset(supported_openai_params(model))
                 nano_unsupported: Final = tuple(key for key in optional_params if key not in nano_supported)
@@ -177,12 +198,14 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
                     raise SeeGenError(
                         status_code=400, message=f"Unsupported parameters for {model}: {nano_unsupported}"
                     )
-                nano_forwarded: Final = {
-                    key: value
-                    for key, value in optional_params.items()
-                    if key in nano_supported and key != "response_format"
-                }
-                return {"model": model_name, "prompt": prompt, **nano_forwarded}
+                nano_forwarded: Final = MappingProxyType(
+                    {
+                        key: value
+                        for key, value in optional_params.items()
+                        if key in nano_supported and key != "response_format"
+                    }
+                )
+                return parse_json_mapping(MappingProxyType({"model": model_name, "prompt": prompt, **nano_forwarded}))
             case unreachable:  # pyright: ignore[reportUnnecessaryComparison]  # exhaustive variant sentinel
                 assert_never(unreachable)
 
@@ -191,10 +214,10 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
         model: str,
         raw_response: httpx.Response,
         model_response: ImageResponse,
-        logging_obj: LiteLLMLoggingObj,
-        request_data: dict[str, JsonValue],
-        optional_params: dict[str, JsonValue],
-        litellm_params: dict[str, JsonValue],
+        logging_obj: SeeGenImageLogger,
+        request_data: Mapping[str, JsonValue],
+        optional_params: Mapping[str, JsonValue],
+        litellm_params: Mapping[str, JsonValue],
         encoding: tiktoken.Encoding | None,
         api_key: str | None = None,
         json_mode: bool | None = None,
@@ -203,11 +226,13 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
         if task.status != "done" or not task.image_urls:
             raise error_from_response(
                 status_code=502,
-                payload={"error": "invalid_image_response", "message": task.failure_reason or "missing image URLs"},
+                payload=MappingProxyType(
+                    {"error": "invalid_image_response", "message": task.failure_reason or "missing image URLs"}
+                ),
                 headers=raw_response.headers,
             )
         return ImageResponse(
-            data=[ImageObject(url=url) for url in task.image_urls],
+            data=_IMAGE_OBJECT_LIST_ADAPTER.validate_python(tuple(ImageObject(url=url) for url in task.image_urls)),
             usage=_image_usage(task.usage),
         )
 
@@ -215,6 +240,6 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
         self,
         error_message: str,
         status_code: int,
-        headers: dict[str, str] | httpx.Headers,
+        headers: Mapping[str, str] | httpx.Headers,
     ) -> SeeGenError:
-        return SeeGenError(status_code=status_code, message=error_message, headers=headers)
+        return SeeGenError(status_code=status_code, message=error_message, headers=parse_headers(headers))

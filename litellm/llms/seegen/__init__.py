@@ -1,3 +1,3 @@
 from .image_generation import SeeGenImageGenerationConfig
 
-__all__ = ["SeeGenImageGenerationConfig"]
+__all__ = ("SeeGenImageGenerationConfig",)

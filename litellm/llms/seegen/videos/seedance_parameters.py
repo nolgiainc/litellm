@@ -1,23 +1,26 @@
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final
 
 from litellm.types.videos.main import VideoCreateOptionalRequestParams
 
-from ..common_utils import JsonValue, SeeGenError, parse_json_mapping
+from ..common_utils import EMPTY_JSON_OBJECT, JsonValue, SeeGenError, parse_json_mapping
 from .models import SEEDANCE_25_MODELS, SEEDANCE_STANDARD_20_MODELS, model_name, video_family
 
-SIZE_OPTIONS: Final[dict[str, tuple[str, str]]] = {
-    "854x480": ("16:9", "480p"),
-    "480x854": ("9:16", "480p"),
-    "1280x720": ("16:9", "720p"),
-    "720x1280": ("9:16", "720p"),
-    "1920x1080": ("16:9", "1080p"),
-    "1080x1920": ("9:16", "1080p"),
-    "2560x1440": ("16:9", "2K"),
-    "1440x2560": ("9:16", "2K"),
-    "3840x2160": ("16:9", "4K"),
-    "2160x3840": ("9:16", "4K"),
-}
+SIZE_OPTIONS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
+    {
+        "854x480": ("16:9", "480p"),
+        "480x854": ("9:16", "480p"),
+        "1280x720": ("16:9", "720p"),
+        "720x1280": ("9:16", "720p"),
+        "1920x1080": ("16:9", "1080p"),
+        "1080x1920": ("9:16", "1080p"),
+        "2560x1440": ("16:9", "2K"),
+        "1440x2560": ("9:16", "2K"),
+        "3840x2160": ("16:9", "4K"),
+        "2160x3840": ("9:16", "4K"),
+    }
+)
 SUPPORTED_PARAMS: Final = frozenset(
     {
         "seconds",
@@ -66,38 +69,68 @@ def media_urls(value: JsonValue | None, name: str) -> tuple[str, ...]:
     raise SeeGenError(status_code=400, message=f"{name} must be a URL or list of URLs")
 
 
+def _size_params(params: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+    size: Final = params.get("size")
+    if size is not None:
+        if not isinstance(size, str) or size not in SIZE_OPTIONS:
+            raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
+        ratio, resolution = SIZE_OPTIONS[size]
+        return MappingProxyType({"ratio": ratio, "resolution": resolution})
+    ratio_params: Final[Mapping[str, JsonValue]] = (
+        MappingProxyType({"ratio": params["ratio"]}) if "ratio" in params else EMPTY_JSON_OBJECT
+    )
+    resolution_params: Final[Mapping[str, JsonValue]] = (
+        MappingProxyType({"resolution": params["resolution"]}) if "resolution" in params else EMPTY_JSON_OBJECT
+    )
+    return MappingProxyType({**ratio_params, **resolution_params})
+
+
+def _edit_params(params: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+    if params.get("omni_reference_task_type") != "edit":
+        return EMPTY_JSON_OBJECT
+    requested_duration: Final = params.get("duration")
+    if requested_duration not in (None, -1):
+        raise SeeGenError(status_code=400, message="Seedance editing duration must be -1")
+    return MappingProxyType({"duration": -1})
+
+
 def map_seedance_params(
     params: VideoCreateOptionalRequestParams,
     model: str,
     drop_params: bool,
-) -> dict[str, JsonValue]:
+) -> Mapping[str, JsonValue]:
     normalized_model: Final = model_name(model)
     video_family(normalized_model)
     parsed: Final = parse_json_mapping(params)
-    extra_body: Final = parsed.pop("extra_body", None)
+    extra_body: Final = parsed.get("extra_body")
     if extra_body is not None and not isinstance(extra_body, dict):
         raise SeeGenError(status_code=400, message="extra_body must be an object")
-    combined: Final = {**parsed, **(extra_body or {})}
+    base_params: Final = MappingProxyType({key: value for key, value in parsed.items() if key != "extra_body"})
+    extra_params: Final[Mapping[str, JsonValue]] = extra_body if isinstance(extra_body, dict) else EMPTY_JSON_OBJECT
+    combined: Final = MappingProxyType({**base_params, **extra_params})
     unsupported: Final = tuple(
         key for key in combined if key not in SUPPORTED_PARAMS and key not in IGNORED_STANDARD_PARAMS
     )
     if unsupported and not drop_params:
         raise SeeGenError(status_code=400, message=f"Unsupported parameters for {model}: {unsupported}")
-    mapped: Final[dict[str, JsonValue]] = {key: value for key, value in combined.items() if key in SUPPORTED_PARAMS}
-    if "seconds" in mapped:
-        mapped["duration"] = _duration(mapped.pop("seconds"))
-    elif "duration" in mapped:
-        mapped["duration"] = _duration(mapped["duration"])
-    size: Final = mapped.pop("size", None)
-    if size is not None:
-        if not isinstance(size, str) or size not in SIZE_OPTIONS:
-            raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
-        mapped["ratio"], mapped["resolution"] = SIZE_OPTIONS[size]
-    if mapped.get("omni_reference_task_type") == "edit":
-        requested_duration: Final = mapped.get("duration")
-        if requested_duration not in (None, -1):
-            raise SeeGenError(status_code=400, message="Seedance editing duration must be -1")
-        mapped["duration"] = -1
+    selected: Final[Mapping[str, JsonValue]] = MappingProxyType(
+        {key: value for key, value in combined.items() if key in SUPPORTED_PARAMS}
+    )
+    duration_params: Final[Mapping[str, JsonValue]] = (
+        MappingProxyType({"duration": _duration(selected.get("seconds"))})
+        if "seconds" in selected
+        else MappingProxyType({"duration": _duration(selected.get("duration"))})
+        if "duration" in selected
+        else EMPTY_JSON_OBJECT
+    )
+    size_params: Final = _size_params(selected)
+    transformed: Final = frozenset({"seconds", "duration", "size", "ratio", "resolution"})
+    retained: Final[Mapping[str, JsonValue]] = MappingProxyType(
+        {key: value for key, value in selected.items() if key not in transformed}
+    )
+    normalized: Final[Mapping[str, JsonValue]] = MappingProxyType({**retained, **duration_params, **size_params})
+    edit_params: Final = _edit_params(normalized)
+    mapped: Final[Mapping[str, JsonValue]] = MappingProxyType({**normalized, **edit_params})
     _validate_options(normalized_model, mapped)
     return mapped
 

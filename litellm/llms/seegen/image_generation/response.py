@@ -4,10 +4,13 @@ import base64
 from typing import Final
 
 import httpx
+from pydantic import TypeAdapter
 
 from litellm.types.utils import ImageObject, ImageResponse
 
 from ..common_utils import AsyncHTTPClient, SeeGenError, SyncHTTPClient
+
+_IMAGE_LIST_ADAPTER: Final = TypeAdapter(list[ImageObject])
 
 
 def _fetch_b64_sync(url: str, client: SyncHTTPClient, timeout: float | httpx.Timeout | None) -> str:
@@ -24,15 +27,29 @@ async def _fetch_b64_async(url: str, client: AsyncHTTPClient, timeout: float | h
     return base64.b64encode(response.content).decode()
 
 
+async def _fetch_b64_objects(
+    urls: tuple[str, ...],
+    client: AsyncHTTPClient,
+    timeout: float | httpx.Timeout | None,
+) -> tuple[ImageObject, ...]:
+    if not urls:
+        return ()
+    first: Final = ImageObject(b64_json=await _fetch_b64_async(urls[0], client, timeout))
+    remaining: Final = await _fetch_b64_objects(urls[1:], client, timeout)
+    return (first, *remaining)
+
+
 def as_b64_sync(
     response: ImageResponse,
     client: SyncHTTPClient,
     timeout: float | httpx.Timeout | None,
 ) -> ImageResponse:
-    urls: Final = tuple(image.url for image in (response.data or []) if image.url is not None)
+    urls: Final = tuple(image.url for image in (response.data or ()) if image.url is not None)
     return ImageResponse(
         created=response.created,
-        data=[ImageObject(b64_json=_fetch_b64_sync(url, client, timeout)) for url in urls],
+        data=_IMAGE_LIST_ADAPTER.validate_python(
+            tuple(ImageObject(b64_json=_fetch_b64_sync(url, client, timeout)) for url in urls)
+        ),
         usage=response.usage,
     )
 
@@ -42,8 +59,8 @@ async def as_b64_async(
     client: AsyncHTTPClient,
     timeout: float | httpx.Timeout | None,
 ) -> ImageResponse:
-    urls: Final = tuple(image.url for image in (response.data or []) if image.url is not None)
-    data: Final = [ImageObject(b64_json=await _fetch_b64_async(url, client, timeout)) for url in urls]
+    urls: Final = tuple(image.url for image in (response.data or ()) if image.url is not None)
+    data: Final = _IMAGE_LIST_ADAPTER.validate_python(await _fetch_b64_objects(urls, client, timeout))
     return ImageResponse(
         created=response.created,
         data=data,

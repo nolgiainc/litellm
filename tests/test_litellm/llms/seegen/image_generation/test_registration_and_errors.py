@@ -5,7 +5,6 @@ import pytest
 from pydantic import JsonValue as PydanticJsonValue
 from pydantic import TypeAdapter
 
-import litellm
 from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
 from litellm.litellm_core_utils.llm_cost_calc.utils import CostCalculatorUtils
 from litellm.llms.seegen.common_utils import JsonValue, SeeGenError, error_from_response
@@ -85,10 +84,7 @@ def test_provider_routing_config_and_pricing_are_registered() -> None:
             assert prices[model]["output_cost_per_image_token"] == 0.00003
 
 
-def test_cost_router_uses_flat_and_token_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-    litellm.model_cost = litellm.get_model_cost_map(url="")
-
+def test_cost_router_uses_flat_and_token_pricing(local_model_cost_map: None) -> None:
     flat_cost = CostCalculatorUtils.route_image_generation_cost_calculator(
         model="seedream-v4.0",
         custom_llm_provider="seegen",

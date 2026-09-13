@@ -1,6 +1,9 @@
 from collections.abc import Mapping
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final, assert_never
+
+from pydantic import TypeAdapter
 
 from litellm.types.llms.openai import OpenAIImageGenerationOptionalParams
 
@@ -18,6 +21,7 @@ _GPT_IMAGE_MODELS: Final = frozenset({"gpt-image-2", "gpt-image-2.5-sunburst", "
 _NANO_BANANA_MODELS: Final = frozenset({"nano-banana-2", "nano-banana-pro"})
 _GPT_25_MODELS: Final = frozenset({"gpt-image-2.5-sunburst", "gpt-image-2.5-flare"})
 _NANO_ASPECT_RATIOS: Final = ("1:1", "4:3", "3:2", "5:4", "3:4", "4:5", "16:9", "9:16", "21:9", "2:3")
+_JSON_LIST_ADAPTER: Final = TypeAdapter(list[JsonValue])
 _SEEDREAM_BASE_PARAMS: Final[tuple[OpenAIImageGenerationOptionalParams, ...]] = (
     "image",
     "size",
@@ -94,18 +98,18 @@ def supported_openai_params(model: str) -> tuple[OpenAIImageGenerationOptionalPa
             assert_never(unreachable)
 
 
-def _normalized_images(value: JsonValue, limit: int) -> list[str]:
+def _normalized_images(value: JsonValue, limit: int) -> tuple[str, ...]:
     if isinstance(value, str):
-        return [value]
+        return (value,)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise SeeGenError(status_code=400, message="image inputs must be a string or list of strings")
     if len(value) > limit:
         raise SeeGenError(status_code=400, message=f"image inputs exceed the model limit of {limit}")
-    return [item for item in value if isinstance(item, str)]
+    return tuple(item for item in value if isinstance(item, str))
 
 
 def _nano_size(size: str) -> tuple[str, str | None]:
-    if size in {"1K", "2K", "4K"}:
+    if size in frozenset({"1K", "2K", "4K"}):
         return size, None
     try:
         width, height = (int(part) for part in size.lower().split("x"))
@@ -123,28 +127,37 @@ def _nano_size(size: str) -> tuple[str, str | None]:
     return resolution, aspect_ratio
 
 
-def _map_seedream(params: Mapping[str, JsonValue], model: str) -> dict[str, JsonValue]:
+def _map_seedream(params: Mapping[str, JsonValue], model: str) -> Mapping[str, JsonValue]:
     image: Final = params.get("image")
     limit: Final = 10 if seegen_model_name(model) == "seedream-v5.0-pro" else 14
     normalized: Final = _normalized_images(image, limit) if image is not None else None
-    mapped_image: Final[JsonValue] = normalized[0] if normalized is not None and len(normalized) == 1 else normalized
-    return {**params, **({"image": mapped_image} if mapped_image is not None else {}), "watermark": False}
+    mapped_image: Final[JsonValue | None] = (
+        normalized[0]
+        if normalized is not None and len(normalized) == 1
+        else _JSON_LIST_ADAPTER.validate_python(normalized)
+        if normalized is not None
+        else None
+    )
+    image_params: Final[Mapping[str, JsonValue]] = (
+        MappingProxyType({"image": mapped_image}) if mapped_image is not None else MappingProxyType({})
+    )
+    return MappingProxyType({**params, **image_params, "watermark": False})
 
 
 def _map_gpt_image(
     params: Mapping[str, JsonValue],
     model: str,
     drop_params: bool,
-) -> dict[str, JsonValue]:
+) -> Mapping[str, JsonValue]:
     rejected: Final = (
         *(("stream",) if params.get("stream") not in (None, False) else ()),
         *(("partial_images",) if params.get("partial_images") is not None else ()),
     )
     quality: Final = params.get("quality")
     supported_qualities: Final = (
-        {"auto", "low", "medium", "high", "xhigh", "max"}
+        frozenset({"auto", "low", "medium", "high", "xhigh", "max"})
         if seegen_model_name(model) in _GPT_25_MODELS
-        else {"auto", "low", "medium", "high"}
+        else frozenset({"auto", "low", "medium", "high"})
     )
     quality_invalid: Final = quality is not None and (
         not isinstance(quality, str) or quality not in supported_qualities
@@ -169,9 +182,8 @@ def _map_gpt_image(
     )
     if invalid and not drop_params:
         raise SeeGenError(status_code=400, message=f"Unsupported parameters for {model}: {invalid}")
-    return {
-        key: value for key, value in params.items() if key not in invalid and key not in {"stream", "partial_images"}
-    }
+    ignored: Final = frozenset({"stream", "partial_images"})
+    return MappingProxyType({key: value for key, value in params.items() if key not in invalid and key not in ignored})
 
 
 def _gpt_size_invalid(size: JsonValue) -> bool:
@@ -194,24 +206,33 @@ def _gpt_size_invalid(size: JsonValue) -> bool:
     )
 
 
-def _map_nano_banana(params: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+def _map_nano_banana(params: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
     size: Final = params.get("size")
     resolution, aspect_ratio = _nano_size(size) if isinstance(size, str) else (params.get("resolution"), None)
     raw_images: Final = params.get("images", params.get("image"))
     images: Final = _normalized_images(raw_images, 10) if raw_images is not None else None
-    return {
-        **{key: value for key, value in params.items() if key not in {"size", "image", "images"}},
-        **({"resolution": resolution} if resolution is not None else {}),
-        **({"aspect_ratio": aspect_ratio} if aspect_ratio is not None else {}),
-        **({"images": images} if images is not None else {}),
-    }
+    serialized_images: Final = _JSON_LIST_ADAPTER.validate_python(images) if images is not None else None
+    ignored: Final = frozenset({"size", "image", "images"})
+    retained: Final[Mapping[str, JsonValue]] = MappingProxyType(
+        {key: value for key, value in params.items() if key not in ignored}
+    )
+    resolution_params: Final[Mapping[str, JsonValue]] = (
+        MappingProxyType({"resolution": resolution}) if resolution is not None else MappingProxyType({})
+    )
+    ratio_params: Final[Mapping[str, JsonValue]] = (
+        MappingProxyType({"aspect_ratio": aspect_ratio}) if aspect_ratio is not None else MappingProxyType({})
+    )
+    image_params: Final[Mapping[str, JsonValue]] = (
+        MappingProxyType({"images": serialized_images}) if serialized_images is not None else MappingProxyType({})
+    )
+    return MappingProxyType({**retained, **resolution_params, **ratio_params, **image_params})
 
 
 def _explicit_params(
     combined: Mapping[str, JsonValue],
     model: str,
     drop_params: bool,
-) -> dict[str, JsonValue]:
+) -> Mapping[str, JsonValue]:
     supported: Final = frozenset(supported_openai_params(model))
     unsupported: Final = tuple(key for key in combined if key not in supported)
     if unsupported and not drop_params:
@@ -220,11 +241,13 @@ def _explicit_params(
     response_format_invalid: Final = response_format not in (None, "url", "b64_json")
     if response_format_invalid and not drop_params:
         raise SeeGenError(status_code=400, message=f"Unsupported response_format for {model}: {response_format}")
-    return {
-        key: value
-        for key, value in combined.items()
-        if key in supported and not (key == "response_format" and response_format_invalid)
-    }
+    return MappingProxyType(
+        {
+            key: value
+            for key, value in combined.items()
+            if key in supported and not (key == "response_format" and response_format_invalid)
+        }
+    )
 
 
 def map_openai_params(
@@ -232,8 +255,8 @@ def map_openai_params(
     optional_params: Mapping[str, JsonValue],
     model: str,
     drop_params: bool,
-) -> dict[str, JsonValue]:
-    combined: Final = {**non_default_params, **optional_params}
+) -> Mapping[str, JsonValue]:
+    combined: Final = MappingProxyType({**non_default_params, **optional_params})
     family: Final = seegen_model_family(model)
     match family:
         case SeeGenModelFamily.SEEDREAM:
