@@ -250,7 +250,7 @@ def _validate_options(family: SeeGenVideoFamily, params: Mapping[str, JsonValue]
     allowed_resolutions: Final = (
         frozenset({"480P", "720P", "1080P", "2K", "4K"})
         if family == SeeGenVideoFamily.WAN
-        or model_name(model) in {"happyhorse-1.1-t2v", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v"}
+        or model_name(model) in frozenset({"happyhorse-1.1-t2v", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v"})
         else frozenset({"720P", "1080P"})
         if family == SeeGenVideoFamily.HAPPYHORSE_EDIT
         else frozenset({"720P", "1080P", "2K", "4K"})
