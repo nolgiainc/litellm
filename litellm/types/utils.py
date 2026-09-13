@@ -2444,6 +2444,9 @@ class ImageObject(OpenAIImage):
 
 
 class ImageUsageInputTokensDetails(BaseLiteLLMOpenAIResponseObject):
+    cached_tokens: int = 0
+    """The number of input tokens served from cache."""
+
     image_tokens: int
     """The number of image tokens in the input prompt."""
 
@@ -3777,6 +3780,7 @@ class LlmProviders(str, Enum):
     AI21 = "ai21"
     BASETEN = "baseten"
     BLACK_FOREST_LABS = "black_forest_labs"
+    SEEGEN = "seegen"
     AZURE = "azure"
     AZURE_TEXT = "azure_text"
     AZURE_AI = "azure_ai"

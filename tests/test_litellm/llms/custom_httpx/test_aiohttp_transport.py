@@ -1196,3 +1196,44 @@ async def test_genuine_request_cancellation_still_propagates():
         if sys.version_info >= (3, 11):
             current.uncancel()
         await transport.aclose()
+
+
+@pytest.mark.asyncio
+async def test_handle_async_request_preserves_non_ascii_response_headers():
+    """A CDN response header carrying UTF-8 (e.g. a Content-Disposition
+    filename) must not crash httpx.Response construction with an ascii
+    UnicodeEncodeError (hit live on ByteDance TOS video downloads)."""
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._loop = None
+
+        def request(self, *args, **kwargs):
+            class Resp:
+                status = 200
+                headers = {"Content-Disposition": 'attachment; filename="视频结果.mp4"'}
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    pass
+
+                @property
+                def content(self):
+                    class C:
+                        async def iter_chunked(self, size):
+                            yield b""
+
+                    return C()
+
+            return Resp()
+
+    transport = LiteLLMAiohttpTransport(client=lambda: FakeSession())  # pyright: ignore[reportArgumentType]  # fake session stands in for aiohttp.ClientSession
+    request = httpx.Request("GET", "http://example.com")
+    response = await transport.handle_async_request(request)
+    assert response.headers.get("content-disposition") == 'attachment; filename="视频结果.mp4"'

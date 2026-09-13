@@ -12454,6 +12454,331 @@
             "/v1/images/generations"
         ]
     },
+    "seegen/seedream-v4.0": {
+        "litellm_provider": "seegen",
+        "mode": "image_generation",
+        "output_cost_per_image": 0.03,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "supports_vision": true
+    },
+    "seegen/seedream-v5.0-lite": {
+        "litellm_provider": "seegen",
+        "mode": "image_generation",
+        "output_cost_per_image": 0.035,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "supports_vision": true
+    },
+    "seegen/seedream-v4.5": {
+        "litellm_provider": "seegen",
+        "mode": "image_generation",
+        "output_cost_per_image": 0.04,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "supports_vision": true
+    },
+    "seegen/seedream-v5.0-pro": {
+        "litellm_provider": "seegen",
+        "metadata": {
+            "comment": "Base rate is $0.045 per image through 2.61 million output pixels; the higher tier is $0.09 per image"
+        },
+        "mode": "image_generation",
+        "output_cost_per_image": 0.045,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "supports_vision": true
+    },
+    "seegen/nano-banana-2": {
+        "litellm_provider": "seegen",
+        "metadata": {
+            "comment": "Base rate is $0.08 per 1K image; 2K is $0.12 and 4K is $0.19"
+        },
+        "mode": "image_generation",
+        "output_cost_per_image": 0.08,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "supports_vision": true
+    },
+    "seegen/nano-banana-pro": {
+        "litellm_provider": "seegen",
+        "metadata": {
+            "comment": "Base rate is $0.16 per 1K or 2K image; 4K is $0.30"
+        },
+        "mode": "image_generation",
+        "output_cost_per_image": 0.16,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "supports_vision": true
+    },
+    "seegen/gpt-image-2": {
+        "cache_read_input_token_cost": 1.25e-06,
+        "input_cost_per_image_token": 8e-06,
+        "input_cost_per_token": 5e-06,
+        "litellm_provider": "seegen",
+        "mode": "image_generation",
+        "output_cost_per_image_token": 3e-05,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "supports_vision": true
+    },
+    "seegen/gpt-image-2.5-sunburst": {
+        "cache_read_input_token_cost": 1.25e-06,
+        "input_cost_per_image_token": 8e-06,
+        "input_cost_per_token": 5e-06,
+        "litellm_provider": "seegen",
+        "mode": "image_generation",
+        "output_cost_per_image_token": 3e-05,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "supports_vision": true
+    },
+    "seegen/gpt-image-2.5-flare": {
+        "cache_read_input_token_cost": 1.25e-06,
+        "input_cost_per_image_token": 8e-06,
+        "input_cost_per_token": 5e-06,
+        "litellm_provider": "seegen",
+        "mode": "image_generation",
+        "output_cost_per_image_token": 3e-05,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "supports_vision": true
+    },
+    "seegen/doubao-seedance-2-5-260628": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 6e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/doubao-seedance-2-0-260128": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 4e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/doubao-seedance-2-0-fast-260128": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 3.142857e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/doubao-seedance-2-0-mini-260615": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 2e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/dreamina-seedance-2-5-260628": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 6.4e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/dreamina-seedance-2-0-260128": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 4.3e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/dreamina-seedance-2-0-fast-260128": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 3.3e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/dreamina-seedance-2-0-mini-260615": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 2.1e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/nsfw-seedance-2-5": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 6.4e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/nsfw-seedance-2-0": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 4.3e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/nsfw-seedance-2-0-fast": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 3.3e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/nsfw-seedance-2-0-mini": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_video_token": 2.1e-06,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/happyhorse-1.1-t2v": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.1285714,
+        "output_cost_per_second_480p": 0.0642857,
+        "output_cost_per_second_1080p": 0.1714286,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/happyhorse-1.1-i2v": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.1285714,
+        "output_cost_per_second_480p": 0.0642857,
+        "output_cost_per_second_1080p": 0.1714286,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/happyhorse-1.1-r2v": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.1285714,
+        "output_cost_per_second_480p": 0.0642857,
+        "output_cost_per_second_1080p": 0.1714286,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/happyhorse-1.0-t2v": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.1285714,
+        "output_cost_per_second_1080p": 0.2285714,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/happyhorse-1.0-i2v": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.1285714,
+        "output_cost_per_second_1080p": 0.2285714,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/happyhorse-1.0-r2v": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.1285714,
+        "output_cost_per_second_1080p": 0.2285714,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/happyhorse-1.0-video-edit": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.1285714,
+        "output_cost_per_second_1080p": 0.2285714,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/wan3.0-video": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.0428571,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/wan3.0-video-prime": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.0642857,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/nsfw-wan3.0-video": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.0428571,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "seegen/nsfw-wan3.0-video-prime": {
+        "litellm_provider": "seegen",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.0642857,
+        "source": "https://api.seegen.ai",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
     "cerebras/llama-3.3-70b": {
         "input_cost_per_token": 8.5e-07,
         "litellm_provider": "cerebras",

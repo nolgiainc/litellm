@@ -676,6 +676,7 @@ lambda_ai_models: Set = set()
 inception_models: Set = set()
 hyperbolic_models: Set = set()
 black_forest_labs_models: Set = set()
+seegen_models: Set = set()  # mutable-ok: provider model registry is populated in place at runtime
 recraft_models: Set = set()
 cometapi_models: Set = set()
 oci_models: Set = set()
@@ -943,6 +944,8 @@ def _populate_provider_model_sets(model_cost_map: Dict) -> None:
             hyperbolic_models.add(key)
         elif value.get("litellm_provider") == "black_forest_labs":
             black_forest_labs_models.add(key)
+        elif value.get("litellm_provider") == "seegen":
+            seegen_models.add(key)
         elif value.get("litellm_provider") == "recraft":
             recraft_models.add(key)
         elif value.get("litellm_provider") == "cometapi":
@@ -1097,6 +1100,7 @@ model_list = list(
     | lambda_ai_models
     | inception_models
     | black_forest_labs_models
+    | seegen_models
     | recraft_models
     | cometapi_models
     | oci_models
@@ -1208,6 +1212,7 @@ def _build_models_by_provider() -> dict:
         "inception": inception_models,
         "hyperbolic": hyperbolic_models,
         "black_forest_labs": black_forest_labs_models,
+        "seegen": seegen_models,
         "recraft": recraft_models,
         "cometapi": cometapi_models,
         "oci": oci_models,

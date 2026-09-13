@@ -1,0 +1,240 @@
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Final, Literal, Protocol, TypeVar
+
+import httpx
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
+from typing_extensions import assert_never
+
+from litellm.llms.base_llm.chat.transformation import BaseLLMException
+
+_JsonInputT: Final = TypeVar("_JsonInputT")
+
+DEFAULT_API_BASE: Final = "https://api.seegen.ai"
+IMAGE_GENERATION_PATH: Final = "/v1/images/generations"
+DEFAULT_POLLING_INTERVAL: Final = 4.0
+DEFAULT_MAX_POLLING_TIME: Final = 600.0
+
+
+class SeeGenError(BaseLLMException):
+    pass
+
+
+class SyncHTTPClient(Protocol):
+    def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,  # mutable-ok: HTTPHandler protocol requires dict headers
+        timeout: float | httpx.Timeout | None = None,
+    ) -> httpx.Response: ...
+
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, JsonValue],  # mutable-ok: HTTPHandler protocol requires a dict JSON body
+        headers: dict[str, str] | None = None,  # mutable-ok: HTTPHandler protocol requires dict headers
+        timeout: float | httpx.Timeout | None = None,
+    ) -> httpx.Response: ...
+
+
+class AsyncHTTPClient(Protocol):
+    async def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,  # mutable-ok: HTTPHandler protocol requires dict headers
+        timeout: float | httpx.Timeout | None = None,
+    ) -> httpx.Response: ...
+
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, JsonValue],  # mutable-ok: HTTPHandler protocol requires a dict JSON body
+        headers: dict[str, str] | None = None,  # mutable-ok: HTTPHandler protocol requires dict headers
+        timeout: float | httpx.Timeout | None = None,
+    ) -> httpx.Response: ...
+
+
+class SeeGenImageLogger(Protocol):
+    def pre_call(
+        self,
+        input: str,
+        api_key: str,
+        model: str | None = None,
+        additional_args: Mapping[str, JsonValue] = ...,
+    ) -> None: ...
+
+
+class SeeGenGatewayError(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    error: str
+    message: str
+
+
+class SeeGenOfficialErrorDetail(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    message: str
+    param: str | None = None
+    type: str | None = None
+
+
+class SeeGenOfficialError(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    error: SeeGenOfficialErrorDetail
+
+
+class SeeGenUsage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    generated_images: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class SeeGenGptTokenDetails(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    text_tokens: int = Field(ge=0, default=0)
+    image_tokens: int = Field(ge=0, default=0)
+
+
+class SeeGenGptRawUsage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    input_tokens: int = Field(ge=0, default=0)
+    output_tokens: int = Field(ge=0, default=0)
+    total_tokens: int = Field(ge=0, default=0)
+    cached_tokens: int = Field(ge=0, default=0)
+    input_tokens_details: SeeGenGptTokenDetails | None = None
+    output_tokens_details: SeeGenGptTokenDetails | None = None
+
+
+class SeeGenGptUsage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    raw_usage: SeeGenGptRawUsage | None = Field(default=None, alias="rawUsage")
+    image_count: int = Field(ge=0, default=0, alias="imageCount")
+
+
+class SeeGenSubmittedTask(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    task_id: str = Field(pattern=r"^img-[A-Za-z0-9_-]+$")
+    status: Literal["processing"]
+    model: str
+    created_at: str
+
+
+class SeeGenPolledTask(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    task_id: str = Field(pattern=r"^img-[A-Za-z0-9_-]+$")
+    status: Literal["processing", "done", "failed"]
+    image_urls: tuple[str, ...] = ()
+    usage: SeeGenUsage | SeeGenGptUsage | None = None
+    failure_reason: str | None = None
+
+
+_ERROR_ADAPTER: Final[TypeAdapter[SeeGenGatewayError | SeeGenOfficialError]] = TypeAdapter(
+    SeeGenGatewayError | SeeGenOfficialError
+)
+EMPTY_JSON_OBJECT: Final[Mapping[str, JsonValue]] = MappingProxyType({})
+EMPTY_HEADERS: Final[Mapping[str, str]] = MappingProxyType({})
+_JSON_MAPPING_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
+_HEADERS_ADAPTER: Final = TypeAdapter(dict[str, str])
+
+
+def parse_json_mapping(
+    value: Mapping[str, _JsonInputT],
+) -> dict[str, JsonValue]:  # mutable-ok: validated JSON boundary must return a serializer-compatible dict
+    return _JSON_MAPPING_ADAPTER.validate_python(value)
+
+
+def parse_headers(
+    value: Mapping[str, str] | httpx.Headers,
+) -> dict[str, str]:  # mutable-ok: HTTPHandler requires concrete dict headers
+    return _HEADERS_ADAPTER.validate_python(value)
+
+
+def _error_message(error: SeeGenGatewayError | SeeGenOfficialError) -> str:
+    match error:
+        case SeeGenGatewayError(error=code, message=message):
+            return f"{code}: {message}"
+        case SeeGenOfficialError(error=detail):
+            param: Final = f" ({detail.param})" if detail.param else ""
+            return f"{detail.code}{param}: {detail.message}"
+        case unreachable:  # pyright: ignore[reportUnnecessaryComparison]  # exhaustive variant sentinel
+            assert_never(unreachable)
+
+
+def error_from_response(
+    status_code: int,
+    payload: Mapping[str, JsonValue],
+    headers: Mapping[str, str] | httpx.Headers,
+) -> SeeGenError:
+    parsed_headers: Final = parse_headers(headers)
+    parsed_payload: Final = parse_json_mapping(payload)
+    try:
+        parsed: Final = _ERROR_ADAPTER.validate_python(payload)
+        return SeeGenError(
+            status_code=status_code,
+            message=_error_message(parsed),
+            headers=parsed_headers,
+            body=parsed_payload,
+        )
+    except ValidationError:
+        return SeeGenError(
+            status_code=status_code,
+            message=str(parsed_payload),
+            headers=parsed_headers,
+            body=parsed_payload,
+        )
+
+
+def error_from_http_response(response: httpx.Response) -> SeeGenError:
+    try:
+        parsed: Final = _ERROR_ADAPTER.validate_json(response.content)
+        return SeeGenError(
+            status_code=response.status_code,
+            message=_error_message(parsed),
+            headers=response.headers,
+            response=response,
+        )
+    except ValidationError:
+        return SeeGenError(
+            status_code=response.status_code,
+            message=response.text or "SeeGen returned an invalid error response",
+            headers=response.headers,
+            response=response,
+        )
+
+
+def parse_submitted_task(response: httpx.Response) -> SeeGenSubmittedTask:
+    try:
+        return SeeGenSubmittedTask.model_validate_json(response.content)
+    except ValidationError as exc:
+        raise SeeGenError(
+            status_code=502,
+            message=f"Invalid SeeGen submit response: {exc}",
+            headers=response.headers,
+            response=response,
+        ) from exc
+
+
+def parse_polled_task(response: httpx.Response) -> SeeGenPolledTask:
+    try:
+        return SeeGenPolledTask.model_validate_json(response.content)
+    except ValidationError as exc:
+        raise SeeGenError(
+            status_code=502,
+            message=f"Invalid SeeGen poll response: {exc}",
+            headers=response.headers,
+            response=response,
+        ) from exc

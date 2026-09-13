@@ -455,7 +455,10 @@ class LiteLLMAiohttpTransport(AiohttpTransport):
 
         return httpx.Response(
             status_code=response.status,
-            headers=response.headers,
+            headers=tuple(
+                (key.encode("utf-8", "surrogateescape"), value.encode("utf-8", "surrogateescape"))
+                for key, value in response.headers.items()
+            ),
             stream=AiohttpResponseStream(response),
             request=request,
         )

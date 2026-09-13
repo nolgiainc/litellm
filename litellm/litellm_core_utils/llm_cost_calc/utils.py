@@ -1379,7 +1379,7 @@ def calculate_image_response_cost_from_usage(
     if prompt_tokens == 0 and completion_tokens == 0 and total_tokens == 0:
         return None
 
-    input_tokens_details: Final = getattr(usage, "input_tokens_details", None)
+    input_tokens_details: Final[object] = getattr(usage, "input_tokens_details", None)
     prompt_tokens_details: PromptTokensDetailsWrapper | None = None
     if input_tokens_details is not None:
         # input_tokens_details may be a dict (e.g. OpenAI image edit responses)
@@ -1389,7 +1389,7 @@ def calculate_image_response_cost_from_usage(
         prompt_tokens_details = PromptTokensDetailsWrapper(
             text_tokens=_get_token_detail_value(input_tokens_details, "text_tokens"),
             image_tokens=_get_token_detail_value(input_tokens_details, "image_tokens"),
-            cached_tokens=0,
+            cached_tokens=_get_token_detail_value(input_tokens_details, "cached_tokens") or 0,
         )
 
     output_tokens_details = getattr(usage, "completion_tokens_details", None)
@@ -1624,6 +1624,26 @@ class CostCalculatorUtils:
             return bfl_image_cost_calculator(
                 model=model,
                 image_response=completion_response,
+            )
+        elif custom_llm_provider == litellm.LlmProviders.SEEGEN.value:
+            if model.startswith("gpt-image"):
+                from litellm.llms.openai.image_generation.cost_calculator import (
+                    cost_calculator as openai_gpt_image_cost_calculator,
+                )
+
+                return openai_gpt_image_cost_calculator(
+                    model=model,
+                    image_response=completion_response,
+                    custom_llm_provider=custom_llm_provider,
+                )
+            seegen_model: Final = model if model.startswith("seegen/") else f"seegen/{model}"
+            return default_image_cost_calculator(
+                model=seegen_model,
+                quality=resolved_quality,
+                custom_llm_provider=custom_llm_provider,
+                n=resolved_n,
+                size=resolved_size,
+                optional_params=optional_params,
             )
         elif custom_llm_provider == litellm.LlmProviders.RUNWAYML.value:
             from litellm.llms.runwayml.cost_calculator import (
