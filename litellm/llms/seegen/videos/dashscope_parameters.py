@@ -88,11 +88,15 @@ def media_urls(value: JsonValue | None, name: str) -> tuple[str, ...]:
     raise SeeGenError(status_code=400, message=f"{name} must be a URL or list of URLs")
 
 
+def reference_image_urls(params: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    return media_urls(params.get("input_reference"), "input_reference") + media_urls(params.get("image_urls"), "image_urls")
+
+
 def happyhorse_edit_media(params: Mapping[str, JsonValue]) -> tuple[Mapping[str, JsonValue], ...]:
     videos: Final = media_urls(params.get("video_urls", params.get("base_video_url")), "video_urls")
     if len(videos) != 1:
         raise SeeGenError(status_code=400, message="HappyHorse video-edit requires exactly one video reference")
-    references: Final = media_urls(params.get("input_reference", params.get("image_urls")), "input_reference")
+    references: Final = reference_image_urls(params)
     if len(references) > 5:
         raise SeeGenError(status_code=400, message="HappyHorse video-edit accepts at most 5 reference images")
     video: Final = parse_json_mapping(MappingProxyType({"type": "video", "url": videos[0]}))
@@ -105,7 +109,7 @@ def happyhorse_edit_media(params: Mapping[str, JsonValue]) -> tuple[Mapping[str,
 def wan_media(params: Mapping[str, JsonValue]) -> tuple[Mapping[str, JsonValue], ...]:
     first_frames: Final = media_urls(params.get("image_url"), "image_url")
     last_frames: Final = media_urls(params.get("end_image_url"), "end_image_url")
-    references: Final = media_urls(params.get("input_reference", params.get("image_urls")), "input_reference")
+    references: Final = reference_image_urls(params)
     videos: Final = media_urls(params.get("video_urls"), "video_urls")
     audios: Final = media_urls(params.get("audio_urls"), "audio_urls")
     if len(first_frames) > 1 or len(last_frames) > 1:
@@ -141,7 +145,7 @@ def request_media(
                 raise SeeGenError(status_code=400, message="HappyHorse i2v requires exactly one image_url")
             return (parse_json_mapping(MappingProxyType({"type": "first_frame", "url": first_frames[0]})),)
         case SeeGenVideoFamily.HAPPYHORSE_R2V:
-            references: Final = media_urls(params.get("input_reference", params.get("image_urls")), "input_reference")
+            references: Final = reference_image_urls(params)
             if not 1 <= len(references) <= 9:
                 raise SeeGenError(status_code=400, message="HappyHorse r2v requires 1 to 9 reference images")
             return tuple(

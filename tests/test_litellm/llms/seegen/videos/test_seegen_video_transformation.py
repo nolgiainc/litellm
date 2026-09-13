@@ -835,3 +835,83 @@ def test_wan_accepts_the_platform_image_urls_spelling() -> None:
     media = body["input"]["media"]
     assert [item["type"] for item in media] == ["reference_image", "reference_image"]
     assert "image_urls" in config.get_capability_param_support(WAN_MODEL).supported
+
+
+@pytest.mark.parametrize("model", [WAN_MODEL, HAPPYHORSE_MODEL, "happyhorse-1.0-video-edit"])
+@pytest.mark.parametrize(
+    ("input_reference", "expected_urls"),
+    [
+        (["https://cdn.example/a.png"], ["https://cdn.example/a.png", "https://cdn.example/b.png"]),
+        ("https://cdn.example/a.png", ["https://cdn.example/a.png", "https://cdn.example/b.png"]),
+        ([], ["https://cdn.example/b.png"]),
+        ("", ["https://cdn.example/b.png"]),
+        (None, ["https://cdn.example/b.png"]),
+    ],
+)
+def test_dashscope_preserves_both_reference_inputs(
+    model: str, input_reference: JsonValue, expected_urls: list[str]
+) -> None:
+    video_params = {"video_urls": ["https://cdn.example/source.mp4"]} if model.endswith("video-edit") else {}
+    body, _, _ = _transform_create(
+        SeeGenDashScopeVideoConfig(model),
+        model,
+        "use all references",
+        {**video_params, "input_reference": input_reference, "image_urls": ["https://cdn.example/b.png"]},
+    )
+
+    assert [item for item in body["input"]["media"] if item["type"] == "reference_image"] == [
+        {"type": "reference_image", "url": url} for url in expected_urls
+    ]
+
+
+@pytest.mark.parametrize(
+    ("model", "limit", "message"),
+    [
+        (WAN_MODEL, 10, "vendor limits"),
+        (HAPPYHORSE_MODEL, 9, "1 to 9 reference images"),
+        ("happyhorse-1.0-video-edit", 5, "at most 5 reference images"),
+    ],
+)
+def test_dashscope_applies_reference_limits_to_both_inputs(model: str, limit: int, message: str) -> None:
+    video_params = {"video_urls": ["https://cdn.example/source.mp4"]} if model.endswith("video-edit") else {}
+    params = {
+        **video_params,
+        "input_reference": [f"https://cdn.example/{index}.png" for index in range(limit - 1)],
+        "image_urls": ["https://cdn.example/alias.png"],
+    }
+    body, _, _ = _transform_create(SeeGenDashScopeVideoConfig(model), model, "use all references", params)
+
+    assert len([item for item in body["input"]["media"] if item["type"] == "reference_image"]) == limit
+    with pytest.raises(SeeGenError, match=message):
+        _transform_create(
+            SeeGenDashScopeVideoConfig(model),
+            model,
+            "too many references",
+            {**params, "image_urls": ["https://cdn.example/alias.png", "https://cdn.example/extra.png"]},
+        )
+
+
+@pytest.mark.parametrize("model", [WAN_MODEL, HAPPYHORSE_MODEL, "happyhorse-1.0-video-edit"])
+def test_dashscope_validates_image_urls_even_with_input_reference(model: str) -> None:
+    video_params = {"video_urls": ["https://cdn.example/source.mp4"]} if model.endswith("video-edit") else {}
+    with pytest.raises(SeeGenError, match="image_urls must be a URL or list of URLs"):
+        _transform_create(
+            SeeGenDashScopeVideoConfig(model),
+            model,
+            "invalid alias",
+            {**video_params, "input_reference": ["https://cdn.example/a.png"], "image_urls": 42},
+        )
+
+
+def test_wan_rejects_frame_mode_with_empty_reference_and_populated_alias() -> None:
+    with pytest.raises(SeeGenError, match="mutually exclusive"):
+        _transform_create(
+            SeeGenDashScopeVideoConfig(WAN_MODEL),
+            WAN_MODEL,
+            "mixed modes",
+            {
+                "image_url": "https://cdn.example/start.png",
+                "input_reference": [],
+                "image_urls": ["https://cdn.example/ref.png"],
+            },
+        )
