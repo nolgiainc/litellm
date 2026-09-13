@@ -89,7 +89,9 @@ def media_urls(value: JsonValue | None, name: str) -> tuple[str, ...]:
 
 
 def reference_image_urls(params: Mapping[str, JsonValue]) -> tuple[str, ...]:
-    return media_urls(params.get("input_reference"), "input_reference") + media_urls(params.get("image_urls"), "image_urls")
+    return media_urls(params.get("input_reference"), "input_reference") + media_urls(
+        params.get("image_urls"), "image_urls"
+    )
 
 
 def happyhorse_edit_media(params: Mapping[str, JsonValue]) -> tuple[Mapping[str, JsonValue], ...]:
