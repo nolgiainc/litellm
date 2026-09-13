@@ -506,14 +506,15 @@ def test_dashscope_status_mapping_uses_output_message_and_actual_usage(status: s
         ),
         ("happyhorse-1.1-t2v", set()),
         ("happyhorse-1.1-i2v", {"image_url"}),
-        ("happyhorse-1.1-r2v", {"input_reference"}),
-        ("happyhorse-1.0-video-edit", {"input_reference", "video_urls", "base_video_url"}),
+        ("happyhorse-1.1-r2v", {"input_reference", "image_urls"}),
+        ("happyhorse-1.0-video-edit", {"input_reference", "image_urls", "video_urls", "base_video_url"}),
         (
             WAN_MODEL,
             {
                 "image_url",
                 "end_image_url",
                 "input_reference",
+                "image_urls",
                 "video_urls",
                 "audio_urls",
                 "generate_audio",
@@ -819,3 +820,18 @@ def test_dashscope_status_parses_the_real_integer_sr_usage() -> None:
 
     assert video.status == "completed"
     assert video.usage == {"duration_seconds": 3.0, "video_resolution": "480p"}
+
+
+def test_wan_accepts_the_platform_image_urls_spelling() -> None:
+    config = SeeGenDashScopeVideoConfig(WAN_MODEL)
+    body, _, _ = config.transform_video_create_request(
+        model=WAN_MODEL,
+        prompt="use the references",
+        api_base="https://api.seegen.ai",
+        video_create_optional_request_params={"image_urls": ["https://cdn.example/a.png", "https://cdn.example/b.png"]},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+    media = body["input"]["media"]
+    assert [item["type"] for item in media] == ["reference_image", "reference_image"]
+    assert "image_urls" in config.get_capability_param_support(WAN_MODEL).supported

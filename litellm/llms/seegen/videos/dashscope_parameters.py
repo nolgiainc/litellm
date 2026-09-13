@@ -15,12 +15,12 @@ _HAPPYHORSE_CAPABILITIES: Final[Mapping[SeeGenVideoFamily, frozenset[str]]] = Ma
     {
         SeeGenVideoFamily.HAPPYHORSE_T2V: frozenset(),
         SeeGenVideoFamily.HAPPYHORSE_I2V: frozenset({"image_url"}),
-        SeeGenVideoFamily.HAPPYHORSE_R2V: frozenset({"input_reference"}),
-        SeeGenVideoFamily.HAPPYHORSE_EDIT: frozenset({"input_reference", "video_urls", "base_video_url"}),
+        SeeGenVideoFamily.HAPPYHORSE_R2V: frozenset({"input_reference", "image_urls"}),
+        SeeGenVideoFamily.HAPPYHORSE_EDIT: frozenset({"input_reference", "image_urls", "video_urls", "base_video_url"}),
     }
 )
 _WAN_CAPABILITIES: Final = frozenset(
-    {"image_url", "end_image_url", "input_reference", "video_urls", "audio_urls", "generate_audio"}
+    {"image_url", "end_image_url", "input_reference", "image_urls", "video_urls", "audio_urls", "generate_audio"}
 )
 _SIZE_OPTIONS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
     {
@@ -65,9 +65,9 @@ def supported_params(family: SeeGenVideoFamily) -> frozenset[str]:
         case SeeGenVideoFamily.HAPPYHORSE_I2V:
             return _TUNING_PARAMS | frozenset({"image_url"})
         case SeeGenVideoFamily.HAPPYHORSE_R2V:
-            return _TUNING_PARAMS | frozenset({"input_reference"})
+            return _TUNING_PARAMS | frozenset({"input_reference", "image_urls"})
         case SeeGenVideoFamily.HAPPYHORSE_EDIT:
-            return _TUNING_PARAMS | frozenset({"input_reference", "video_urls", "base_video_url", "audio_setting"})
+            return _TUNING_PARAMS | frozenset({"input_reference", "image_urls", "video_urls", "base_video_url", "audio_setting"})
         case SeeGenVideoFamily.WAN:
             return _TUNING_PARAMS | _WAN_CAPABILITIES | frozenset({"prompt_extend"})
         case SeeGenVideoFamily.SEEDANCE:
@@ -90,7 +90,7 @@ def happyhorse_edit_media(params: Mapping[str, JsonValue]) -> tuple[Mapping[str,
     videos: Final = media_urls(params.get("video_urls", params.get("base_video_url")), "video_urls")
     if len(videos) != 1:
         raise SeeGenError(status_code=400, message="HappyHorse video-edit requires exactly one video reference")
-    references: Final = media_urls(params.get("input_reference"), "input_reference")
+    references: Final = media_urls(params.get("input_reference", params.get("image_urls")), "input_reference")
     if len(references) > 5:
         raise SeeGenError(status_code=400, message="HappyHorse video-edit accepts at most 5 reference images")
     video: Final = parse_json_mapping(MappingProxyType({"type": "video", "url": videos[0]}))
@@ -103,7 +103,7 @@ def happyhorse_edit_media(params: Mapping[str, JsonValue]) -> tuple[Mapping[str,
 def wan_media(params: Mapping[str, JsonValue]) -> tuple[Mapping[str, JsonValue], ...]:
     first_frames: Final = media_urls(params.get("image_url"), "image_url")
     last_frames: Final = media_urls(params.get("end_image_url"), "end_image_url")
-    references: Final = media_urls(params.get("input_reference"), "input_reference")
+    references: Final = media_urls(params.get("input_reference", params.get("image_urls")), "input_reference")
     videos: Final = media_urls(params.get("video_urls"), "video_urls")
     audios: Final = media_urls(params.get("audio_urls"), "audio_urls")
     if len(first_frames) > 1 or len(last_frames) > 1:
@@ -139,7 +139,7 @@ def request_media(
                 raise SeeGenError(status_code=400, message="HappyHorse i2v requires exactly one image_url")
             return (parse_json_mapping(MappingProxyType({"type": "first_frame", "url": first_frames[0]})),)
         case SeeGenVideoFamily.HAPPYHORSE_R2V:
-            references: Final = media_urls(params.get("input_reference"), "input_reference")
+            references: Final = media_urls(params.get("input_reference", params.get("image_urls")), "input_reference")
             if not 1 <= len(references) <= 9:
                 raise SeeGenError(status_code=400, message="HappyHorse r2v requires 1 to 9 reference images")
             return tuple(
