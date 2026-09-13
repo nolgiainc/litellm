@@ -67,7 +67,9 @@ def supported_params(family: SeeGenVideoFamily) -> frozenset[str]:
         case SeeGenVideoFamily.HAPPYHORSE_R2V:
             return _TUNING_PARAMS | frozenset({"input_reference", "image_urls"})
         case SeeGenVideoFamily.HAPPYHORSE_EDIT:
-            return _TUNING_PARAMS | frozenset({"input_reference", "image_urls", "video_urls", "base_video_url", "audio_setting"})
+            return _TUNING_PARAMS | frozenset(
+                {"input_reference", "image_urls", "video_urls", "base_video_url", "audio_setting"}
+            )
         case SeeGenVideoFamily.WAN:
             return _TUNING_PARAMS | _WAN_CAPABILITIES | frozenset({"prompt_extend"})
         case SeeGenVideoFamily.SEEDANCE:
