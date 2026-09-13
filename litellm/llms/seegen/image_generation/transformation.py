@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, assert_never
+from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
 import httpx
 from pydantic import TypeAdapter
+from typing_extensions import assert_never
 
 from litellm.llms.base_llm.image_generation.transformation import BaseImageGenerationConfig
 from litellm.secret_managers.main import get_secret_str

@@ -1,16 +1,17 @@
 from collections.abc import Mapping
-from enum import StrEnum
+from enum import Enum
 from types import MappingProxyType
-from typing import Final, assert_never
+from typing import Final
 
 from pydantic import TypeAdapter
+from typing_extensions import assert_never
 
 from litellm.types.llms.openai import OpenAIImageGenerationOptionalParams
 
 from ..common_utils import JsonValue, SeeGenError
 
 
-class SeeGenModelFamily(StrEnum):
+class SeeGenModelFamily(str, Enum):
     SEEDREAM = "seedream"
     GPT_IMAGE = "gpt_image"
     NANO_BANANA = "nano_banana"

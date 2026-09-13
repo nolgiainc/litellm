@@ -1,6 +1,8 @@
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final, assert_never
+from typing import Final
+
+from typing_extensions import assert_never
 
 from litellm.types.videos.main import VideoCreateOptionalRequestParams
 

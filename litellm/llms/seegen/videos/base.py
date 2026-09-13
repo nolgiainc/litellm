@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final, Never
+from typing import Final
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
+from typing_extensions import Never
 
 import litellm
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj

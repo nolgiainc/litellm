@@ -1,9 +1,10 @@
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final, Literal, Protocol, TypeVar, assert_never
+from typing import Final, Literal, Protocol, TypeVar
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
+from typing_extensions import assert_never
 
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 

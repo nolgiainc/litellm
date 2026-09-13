@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Final, assert_never
+from typing import Final
 
 import httpx
+from typing_extensions import assert_never
 
 import litellm
 from litellm.exceptions import Timeout

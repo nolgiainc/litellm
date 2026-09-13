@@ -1,10 +1,10 @@
-from enum import StrEnum
+from enum import Enum
 from typing import Final
 
 from ..common_utils import SeeGenError
 
 
-class SeeGenVideoFamily(StrEnum):
+class SeeGenVideoFamily(str, Enum):
     SEEDANCE = "seedance"
     HAPPYHORSE_T2V = "happyhorse_t2v"
     HAPPYHORSE_I2V = "happyhorse_i2v"

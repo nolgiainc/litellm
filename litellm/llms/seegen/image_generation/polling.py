@@ -3,10 +3,11 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Final, assert_never
+from typing import Final
 
 import anyio
 import httpx
+from typing_extensions import assert_never
 
 from ..common_utils import (
     AsyncHTTPClient,
