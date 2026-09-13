@@ -9097,6 +9097,10 @@ class ProviderConfigManager:
             )
 
             return get_black_forest_labs_image_generation_config(model)
+        elif LlmProviders.SEEGEN == provider:
+            from litellm.llms.seegen.image_generation import SeeGenImageGenerationConfig
+
+            return SeeGenImageGenerationConfig()
         elif LlmProviders.VERTEX_AI == provider:
             from litellm.llms.vertex_ai.image_generation import (
                 get_vertex_ai_image_generation_config,

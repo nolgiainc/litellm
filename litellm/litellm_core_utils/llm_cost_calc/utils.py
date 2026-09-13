@@ -1625,6 +1625,26 @@ class CostCalculatorUtils:
                 model=model,
                 image_response=completion_response,
             )
+        elif custom_llm_provider == litellm.LlmProviders.SEEGEN.value:
+            if model.startswith("gpt-image"):
+                from litellm.llms.openai.image_generation.cost_calculator import (
+                    cost_calculator as openai_gpt_image_cost_calculator,
+                )
+
+                return openai_gpt_image_cost_calculator(
+                    model=model,
+                    image_response=completion_response,
+                    custom_llm_provider=custom_llm_provider,
+                )
+            seegen_model: Final = model if model.startswith("seegen/") else f"seegen/{model}"
+            return default_image_cost_calculator(
+                model=seegen_model,
+                quality=resolved_quality,
+                custom_llm_provider=custom_llm_provider,
+                n=resolved_n,
+                size=resolved_size,
+                optional_params=optional_params,
+            )
         elif custom_llm_provider == litellm.LlmProviders.RUNWAYML.value:
             from litellm.llms.runwayml.cost_calculator import (
                 cost_calculator as runwayml_image_cost_calculator,

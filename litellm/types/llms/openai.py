@@ -1140,13 +1140,23 @@ OpenAIImageVariationOptionalParams = Literal["n", "size", "response_format", "us
 
 OpenAIImageGenerationOptionalParams = Literal[
     "background",
+    "image",
+    "images",
+    "input_fidelity",
+    "layer_decomposition",
+    "mask",
     "moderation",
     "n",
     "output_compression",
     "output_format",
     "quality",
+    "partial_images",
+    "resolution",
     "response_format",
+    "sequential_image_generation",
+    "sequential_image_generation_options",
     "size",
+    "stream",
     "style",
     "user",
     "seed",
@@ -1158,6 +1168,7 @@ OpenAIImageGenerationOptionalParams = Literal[
     "image_prompt_strength",
     "aspect_ratio",
     "imageConfig",
+    "watermark",
 ]
 
 OpenAIImageEditOptionalParams = Literal[
