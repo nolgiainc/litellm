@@ -48,7 +48,7 @@ class _DashUsage(BaseModel):
 
     output_video_duration: float | None = Field(default=None, ge=0)
     duration: float | None = Field(default=None, ge=0)
-    SR: str | None = None
+    SR: int | str | None = None
 
 
 class _DashResponse(BaseModel):
@@ -213,7 +213,8 @@ class SeeGenDashScopeVideoConfig(SeeGenVideoConfig):
             if duration is not None:
                 usage["duration_seconds"] = duration
             if response.usage.SR is not None:
-                usage["video_resolution"] = response.usage.SR.lower()
+                sr: Final = response.usage.SR
+                usage["video_resolution"] = f"{sr}p" if isinstance(sr, int) else sr.lower()
         video_id: Final = (
             encode_video_id_with_provider(response.output.task_id, custom_llm_provider, self._model)
             if custom_llm_provider

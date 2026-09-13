@@ -716,3 +716,38 @@ def test_public_video_content_polls_wan_then_downloads_result_bytes() -> None:
     )
 
     assert content == b"wan-video"
+
+
+def test_dashscope_status_parses_the_real_integer_sr_usage() -> None:
+    config = SeeGenDashScopeVideoConfig(WAN_MODEL)
+    video = config.transform_video_status_retrieve_response(
+        raw_response=_response(
+            {
+                "request_id": "f8f86eb3-7080-4e6f-a08a-f7ba60fe2c23",
+                "output": {
+                    "task_id": "92a46dbb-e299-4579-89b2-dcc806591b32",
+                    "task_status": "SUCCEEDED",
+                    "video_url": "https://dashscope-0816.oss-accelerate.aliyuncs.com/result.mp4",
+                    "original_video_url": "https://dashscope-0816.oss-accelerate.aliyuncs.com/result.mp4",
+                    "orig_prompt": "a paper boat drifting through a puddle",
+                    "submit_time": "2026-09-13 17:49:04.480",
+                    "scheduled_time": "2026-09-13 17:49:04.498",
+                    "end_time": "2026-09-13 17:50:47.689",
+                },
+                "usage": {
+                    "SR": 480,
+                    "fps": 30,
+                    "ratio": "16:9",
+                    "duration": 3,
+                    "video_count": 1,
+                    "input_video_duration": 0,
+                    "output_video_duration": 3,
+                },
+            }
+        ),
+        logging_obj=Mock(),
+        custom_llm_provider="seegen",
+    )
+
+    assert video.status == "completed"
+    assert video.usage == {"duration_seconds": 3.0, "video_resolution": "480p"}
