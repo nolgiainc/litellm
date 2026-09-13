@@ -1379,7 +1379,7 @@ def calculate_image_response_cost_from_usage(
     if prompt_tokens == 0 and completion_tokens == 0 and total_tokens == 0:
         return None
 
-    input_tokens_details: Final = getattr(usage, "input_tokens_details", None)
+    input_tokens_details: Final[object] = getattr(usage, "input_tokens_details", None)
     prompt_tokens_details: PromptTokensDetailsWrapper | None = None
     if input_tokens_details is not None:
         # input_tokens_details may be a dict (e.g. OpenAI image edit responses)
