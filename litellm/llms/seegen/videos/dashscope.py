@@ -133,10 +133,10 @@ class SeeGenDashScopeVideoConfig(SeeGenVideoConfig):
             MappingProxyType({"audio": params["generate_audio"]})
             if family == SeeGenVideoFamily.WAN and "generate_audio" in params
             else EMPTY_JSON_OBJECT
-            if family == SeeGenVideoFamily.WAN
-            else MappingProxyType({"watermark": False})
         )
-        parameters: Final = parse_json_mapping(MappingProxyType({**base_parameters, **provider_parameters}))
+        parameters: Final = parse_json_mapping(
+            MappingProxyType({**base_parameters, **provider_parameters, "watermark": False})
+        )
         request_data: Final = parse_json_mapping(
             MappingProxyType({"model": model_name(model), "input": input_data, "parameters": parameters})
         )

@@ -2444,6 +2444,9 @@ class ImageObject(OpenAIImage):
 
 
 class ImageUsageInputTokensDetails(BaseLiteLLMOpenAIResponseObject):
+    cached_tokens: int = 0
+    """The number of input tokens served from cache."""
+
     image_tokens: int
     """The number of image tokens in the input prompt."""
 

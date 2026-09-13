@@ -1,14 +1,16 @@
 import base64
 import json
 from collections.abc import Callable
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
+from litellm.litellm_core_utils.llm_cost_calc.utils import CostCalculatorUtils
 from litellm.llms.custom_httpx.http_handler import HTTPHandler
 from litellm.llms.seegen.common_utils import JsonValue, SeeGenError
 from litellm.llms.seegen.image_generation.handler import SeeGenImageGeneration
+from litellm.llms.seegen.image_generation.polling import SeeGenPoller, SeeGenPollRequest
 from litellm.types.utils import ImageResponse
 
 
@@ -157,6 +159,33 @@ def test_should_retry_false_is_terminal_without_resubmission() -> None:
     assert [call.args[0] for call in requests.call_args_list] == ["POST", "GET"]
 
 
+@pytest.mark.parametrize("status_code", (401, 402, 429, 503))
+@pytest.mark.parametrize("asynchronous", (False, True))
+@pytest.mark.asyncio
+async def test_terminal_poll_error_preserves_http_status(status_code: int, asynchronous: bool) -> None:
+    response = httpx.Response(
+        status_code,
+        headers={"x-should-retry": "false"},
+        json={"error": "poll_failed", "message": "upstream rejected polling"},
+        request=httpx.Request("GET", "https://api.seegen.ai/v1/images/generations/img-terminal"),
+    )
+    request = SeeGenPollRequest(url=str(response.request.url), headers={}, timeout=1)
+    poller = SeeGenPoller(interval=0, max_wait=1)
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response) if asynchronous else MagicMock(return_value=response)
+
+    with pytest.raises(SeeGenError, match="upstream rejected polling") as exc_info:
+        if asynchronous:
+            await poller.poll_async(request, client)
+        else:
+            poller.poll_sync(request, client)
+
+    assert exc_info.value.status_code == status_code
+    assert exc_info.value.headers["x-should-retry"] == "false"
+    assert exc_info.value.response is response
+    client.get.assert_called_once()
+
+
 def test_gpt_submit_timeout_reuses_the_idempotency_key() -> None:
     submit_outcomes = iter(("timeout", "success"))
     submitted_headers = MagicMock()
@@ -212,7 +241,8 @@ def test_submit_error_shapes_raise_seegen_error(payload: dict[str, JsonValue]) -
     assert "image_submit_failed" in exc_info.value.message or "invalid_size" in exc_info.value.message
 
 
-def test_poll_done_parses_the_real_gpt_image_usage_shape() -> None:
+@pytest.mark.parametrize("cached_tokens", (0, 5, 13))
+def test_poll_done_parses_the_real_gpt_image_usage_shape(cached_tokens: int, local_model_cost_map: None) -> None:
     def route(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/images/generations":
             return httpx.Response(
@@ -241,7 +271,7 @@ def test_poll_done_parses_the_real_gpt_image_usage_shape() -> None:
                             "image_count": 1,
                             "input_tokens": 13,
                             "total_tokens": 209,
-                            "cached_tokens": 0,
+                            "cached_tokens": cached_tokens,
                             "output_tokens": 196,
                             "input_tokens_details": {"text_tokens": 13, "image_tokens": 0},
                             "output_tokens_details": {"text_tokens": 0, "image_tokens": 196},
@@ -265,3 +295,10 @@ def test_poll_done_parses_the_real_gpt_image_usage_shape() -> None:
     assert result.usage.total_tokens == 209
     assert result.usage.input_tokens_details.text_tokens == 13
     assert result.usage.input_tokens_details.image_tokens == 0
+    assert result.usage.input_tokens_details.cached_tokens == cached_tokens
+    cost = CostCalculatorUtils.route_image_generation_cost_calculator(
+        model="gpt-image-2.5-sunburst",
+        custom_llm_provider="seegen",
+        completion_response=result,
+    )
+    assert cost == pytest.approx((13 - cached_tokens) * 0.000005 + cached_tokens * 0.00000125 + 196 * 0.00003)

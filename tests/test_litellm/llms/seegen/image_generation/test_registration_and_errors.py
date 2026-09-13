@@ -84,7 +84,17 @@ def test_provider_routing_config_and_pricing_are_registered() -> None:
             assert prices[model]["output_cost_per_image_token"] == 0.00003
 
 
-def test_cost_router_uses_flat_and_token_pricing(local_model_cost_map: None) -> None:
+@pytest.mark.parametrize(
+    ("text_tokens", "image_tokens", "cached_tokens", "expected_cost"),
+    ((20, 0, 0, 0.0031), (5, 15, 18, 0.0030385)),
+)
+def test_cost_router_uses_flat_and_token_pricing(
+    local_model_cost_map: None,
+    text_tokens: int,
+    image_tokens: int,
+    cached_tokens: int,
+    expected_cost: float,
+) -> None:
     flat_cost = CostCalculatorUtils.route_image_generation_cost_calculator(
         model="seedream-v4.0",
         custom_llm_provider="seegen",
@@ -97,7 +107,9 @@ def test_cost_router_uses_flat_and_token_pricing(local_model_cost_map: None) -> 
             data=[ImageObject(url="https://cdn.example.com/gpt.png")],
             usage=ImageUsage(
                 input_tokens=20,
-                input_tokens_details=ImageUsageInputTokensDetails(text_tokens=20, image_tokens=0),
+                input_tokens_details=ImageUsageInputTokensDetails(
+                    text_tokens=text_tokens, image_tokens=image_tokens, cached_tokens=cached_tokens
+                ),
                 output_tokens=100,
                 total_tokens=120,
             ),
@@ -105,4 +117,4 @@ def test_cost_router_uses_flat_and_token_pricing(local_model_cost_map: None) -> 
     )
 
     assert math.isclose(flat_cost, 0.03)
-    assert math.isclose(token_cost, 0.0031)
+    assert math.isclose(token_cost, expected_cost)

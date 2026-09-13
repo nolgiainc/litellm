@@ -1389,7 +1389,7 @@ def calculate_image_response_cost_from_usage(
         prompt_tokens_details = PromptTokensDetailsWrapper(
             text_tokens=_get_token_detail_value(input_tokens_details, "text_tokens"),
             image_tokens=_get_token_detail_value(input_tokens_details, "image_tokens"),
-            cached_tokens=0,
+            cached_tokens=_get_token_detail_value(input_tokens_details, "cached_tokens") or 0,
         )
 
     output_tokens_details = getattr(usage, "completion_tokens_details", None)

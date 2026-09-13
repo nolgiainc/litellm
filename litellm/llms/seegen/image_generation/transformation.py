@@ -67,6 +67,7 @@ def _image_usage(usage: SeeGenUsage | SeeGenGptUsage | None) -> ImageUsage:
                 input_tokens_details=ImageUsageInputTokensDetails(
                     image_tokens=details.image_tokens if details is not None else 0,
                     text_tokens=details.text_tokens if details is not None else raw.input_tokens,
+                    cached_tokens=raw.cached_tokens,
                 ),
                 output_tokens=raw.output_tokens,
                 total_tokens=raw.total_tokens,

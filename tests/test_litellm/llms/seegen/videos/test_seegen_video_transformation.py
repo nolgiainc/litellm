@@ -296,6 +296,73 @@ def test_happyhorse_request_shapes_and_forced_watermark() -> None:
     assert edit_body["parameters"]["audio_setting"] == "origin"
 
 
+@pytest.mark.parametrize(
+    ("model", "media_params"),
+    [
+        ("happyhorse-1.1-t2v", {}),
+        ("happyhorse-1.1-i2v", {"image_url": "https://assets.example/start.png"}),
+        ("happyhorse-1.1-r2v", {"input_reference": ["https://assets.example/ref.png"]}),
+    ],
+)
+@pytest.mark.parametrize("prefix", ["", "seegen/"])
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        ({"size": "854x480"}, {"resolution": "480P", "ratio": "16:9"}),
+        ({"size": "480x854"}, {"resolution": "480P", "ratio": "9:16"}),
+        ({"resolution": "480p"}, {"resolution": "480P"}),
+        ({"resolution": "480P"}, {"resolution": "480P"}),
+    ],
+)
+def test_happyhorse_11_request_accepts_480p(
+    model: str,
+    media_params: dict[str, JsonValue],
+    prefix: str,
+    params: dict[str, JsonValue],
+    expected: dict[str, JsonValue],
+) -> None:
+    body, _, _ = _transform_create(
+        SeeGenDashScopeVideoConfig(prefix + model),
+        prefix + model,
+        "A quiet shoreline",
+        {**media_params, **params},
+    )
+
+    assert body["model"] == model
+    assert body["parameters"] == {**expected, "watermark": False}
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["happyhorse-1.0-t2v", "happyhorse-1.0-i2v", "happyhorse-1.0-r2v", "happyhorse-1.0-video-edit"],
+)
+@pytest.mark.parametrize("params", [{"size": "854x480"}, {"size": "480x854"}, {"resolution": "480P"}])
+def test_happyhorse_10_and_edit_reject_480p(model: str, params: dict[str, JsonValue]) -> None:
+    with pytest.raises(SeeGenError, match="Invalid resolution"):
+        _transform_create(SeeGenDashScopeVideoConfig(model), model, "A quiet shoreline", params)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [WAN_MODEL, "wan3.0-video-prime", "nsfw-wan3.0-video", "nsfw-wan3.0-video-prime"],
+)
+@pytest.mark.parametrize("params", [{}, {"watermark": True}])
+@pytest.mark.parametrize("generate_audio", [None, False, True])
+def test_wan_request_forces_watermark_off_and_preserves_audio(
+    model: str, params: dict[str, JsonValue], generate_audio: bool | None
+) -> None:
+    audio_params = {"generate_audio": generate_audio} if generate_audio is not None else {}
+    body, _, _ = _transform_create(
+        SeeGenDashScopeVideoConfig(model),
+        model,
+        "A documentary portrait",
+        {**params, **audio_params},
+    )
+
+    expected_audio = {"audio": generate_audio} if generate_audio is not None else {}
+    assert body["parameters"] == {**expected_audio, "watermark": False}
+
+
 def test_wan_request_maps_frames_reference_media_audio_and_seed() -> None:
     config = SeeGenDashScopeVideoConfig(WAN_MODEL)
     body, _, url = _transform_create(
@@ -332,6 +399,7 @@ def test_wan_request_maps_frames_reference_media_audio_and_seed() -> None:
             "audio": False,
             "seed": -1,
             "prompt_extend": False,
+            "watermark": False,
         },
     }
 

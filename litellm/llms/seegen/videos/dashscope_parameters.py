@@ -7,7 +7,7 @@ from typing_extensions import assert_never
 from litellm.types.videos.main import VideoCreateOptionalRequestParams
 
 from ..common_utils import EMPTY_JSON_OBJECT, JsonValue, SeeGenError, parse_json_mapping
-from .models import SeeGenVideoFamily
+from .models import SeeGenVideoFamily, model_name
 
 STANDARD_PARAMS: Final = frozenset({"model", "prompt", "user", "extra_headers"})
 _TUNING_PARAMS: Final = frozenset({"seconds", "size", "duration", "resolution", "ratio", "seed", "watermark"})
@@ -206,7 +206,7 @@ def map_dashscope_params(
         {key: value for key, value in selected.items() if key not in transformed}
     )
     mapped: Final[Mapping[str, JsonValue]] = MappingProxyType({**retained, **duration_params, **size_params})
-    _validate_options(family, mapped)
+    _validate_options(family, mapped, model)
     return mapped
 
 
@@ -236,7 +236,7 @@ def _resolution(value: JsonValue) -> str:
     return normalized
 
 
-def _validate_options(family: SeeGenVideoFamily, params: Mapping[str, JsonValue]) -> None:
+def _validate_options(family: SeeGenVideoFamily, params: Mapping[str, JsonValue], model: str) -> None:
     duration: Final = params.get("duration")
     if duration is not None:
         duration_valid: Final = (
@@ -250,6 +250,7 @@ def _validate_options(family: SeeGenVideoFamily, params: Mapping[str, JsonValue]
     allowed_resolutions: Final = (
         frozenset({"480P", "720P", "1080P", "2K", "4K"})
         if family == SeeGenVideoFamily.WAN
+        or model_name(model) in {"happyhorse-1.1-t2v", "happyhorse-1.1-i2v", "happyhorse-1.1-r2v"}
         else frozenset({"720P", "1080P"})
         if family == SeeGenVideoFamily.HAPPYHORSE_EDIT
         else frozenset({"720P", "1080P", "2K", "4K"})

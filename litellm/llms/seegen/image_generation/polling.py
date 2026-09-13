@@ -70,15 +70,7 @@ class SeeGenPoller:
         should_retry_values: Final = response.headers.get_list("x-should-retry")
         is_terminal: Final = any(value.lower() == "false" for value in should_retry_values)
         if response.status_code >= 400:
-            response_error: Final = error_from_http_response(response)
-            if is_terminal:
-                raise SeeGenError(
-                    status_code=400,
-                    message=response_error.message,
-                    headers=response.headers,
-                    response=response,
-                )
-            raise response_error
+            raise error_from_http_response(response)
         task: Final = parse_polled_task(response)
         if is_terminal:
             raise SeeGenError(
