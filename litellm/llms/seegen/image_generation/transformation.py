@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     import tiktoken
 from .parameters import (
     SeeGenModelFamily,
-    map_openai_params,
+    map_openai_params as map_seegen_openai_params,
     seegen_model_family,
     seegen_model_name,
     supported_openai_params,
@@ -95,7 +95,7 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
         model: str,
         drop_params: bool,
     ) -> dict[str, JsonValue]:  # mutable-ok: BaseImageGenerationConfig requires a dict
-        return parse_json_mapping(map_openai_params(non_default_params, optional_params, model, drop_params))
+        return parse_json_mapping(map_seegen_openai_params(non_default_params, optional_params, model, drop_params))
 
     def validate_environment(
         self,
