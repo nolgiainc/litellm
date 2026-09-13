@@ -210,3 +210,58 @@ def test_submit_error_shapes_raise_seegen_error(payload: dict[str, JsonValue]) -
 
     assert exc_info.value.status_code == 502
     assert "image_submit_failed" in exc_info.value.message or "invalid_size" in exc_info.value.message
+
+
+def test_poll_done_parses_the_real_gpt_image_usage_shape() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/images/generations":
+            return httpx.Response(
+                202,
+                json={
+                    "task_id": "img-ie435a7aa4d50c188d297bb7",
+                    "status": "processing",
+                    "model": "gpt-image-2",
+                    "created_at": "2026-09-13T09:27:45.657Z",
+                },
+                request=request,
+            )
+        if request.method == "GET" and request.url.path == "/v1/images/generations/img-ie435a7aa4d50c188d297bb7":
+            return httpx.Response(
+                200,
+                json={
+                    "task_id": "img-ie435a7aa4d50c188d297bb7",
+                    "status": "done",
+                    "model": "gpt-image-2",
+                    "image_urls": ["https://image3.example.com/2026/09/13/sailboat_0.png"],
+                    "usage": {
+                        "model": None,
+                        "taskId": "task_cIs5srsk6lgHx8euJeJITfYCDJ8u0jnw",
+                        "rawUsage": {
+                            "images": 1,
+                            "image_count": 1,
+                            "input_tokens": 13,
+                            "total_tokens": 209,
+                            "cached_tokens": 0,
+                            "output_tokens": 196,
+                            "input_tokens_details": {"text_tokens": 13, "image_tokens": 0},
+                            "output_tokens_details": {"text_tokens": 0, "image_tokens": 196},
+                        },
+                        "imageCount": 1,
+                    },
+                    "meta": {"model": "gpt-image-2", "is_fallback": False},
+                    "failure_reason": None,
+                    "created_at": "2026-09-13T09:27:45.657Z",
+                    "completed_at": "2026-09-13T09:28:01.389Z",
+                },
+                request=request,
+            )
+        raise AssertionError((request.method, request.url.path))
+
+    result = _generate(_client(route))
+    assert [image.url for image in result.data or []] == ["https://image3.example.com/2026/09/13/sailboat_0.png"]
+    assert result.usage is not None
+    assert result.usage.input_tokens == 13
+    assert result.usage.output_tokens == 196
+    assert result.usage.total_tokens == 209
+    assert result.usage.input_tokens_details.text_tokens == 13
+    assert result.usage.input_tokens_details.image_tokens == 0

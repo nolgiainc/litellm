@@ -17,6 +17,8 @@ from ..common_utils import (
     IMAGE_GENERATION_PATH,
     JsonValue,
     SeeGenError,
+    SeeGenGptUsage,
+    SeeGenUsage,
     error_from_response,
     parse_polled_task,
 )
@@ -30,6 +32,46 @@ from .parameters import (
     seegen_model_name,
     supported_openai_params,
 )
+
+
+def _image_usage(usage: SeeGenUsage | SeeGenGptUsage | None) -> ImageUsage:
+    match usage:
+        case SeeGenUsage():
+            input_tokens: Final = max(0, usage.total_tokens - usage.output_tokens)
+            return ImageUsage(
+                input_tokens=input_tokens,
+                input_tokens_details=ImageUsageInputTokensDetails(image_tokens=0, text_tokens=input_tokens),
+                output_tokens=usage.output_tokens,
+                total_tokens=usage.total_tokens,
+            )
+        case SeeGenGptUsage():
+            raw: Final = usage.raw_usage
+            if raw is None:
+                return ImageUsage(
+                    input_tokens=0,
+                    input_tokens_details=ImageUsageInputTokensDetails(image_tokens=0, text_tokens=0),
+                    output_tokens=0,
+                    total_tokens=0,
+                )
+            details: Final = raw.input_tokens_details
+            return ImageUsage(
+                input_tokens=raw.input_tokens,
+                input_tokens_details=ImageUsageInputTokensDetails(
+                    image_tokens=details.image_tokens if details is not None else 0,
+                    text_tokens=details.text_tokens if details is not None else raw.input_tokens,
+                ),
+                output_tokens=raw.output_tokens,
+                total_tokens=raw.total_tokens,
+            )
+        case None:
+            return ImageUsage(
+                input_tokens=0,
+                input_tokens_details=ImageUsageInputTokensDetails(image_tokens=0, text_tokens=0),
+                output_tokens=0,
+                total_tokens=0,
+            )
+        case unreachable:  # pyright: ignore[reportUnnecessaryComparison]  # exhaustive variant sentinel
+            assert_never(unreachable)
 
 
 class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
@@ -164,16 +206,9 @@ class SeeGenImageGenerationConfig(BaseImageGenerationConfig):
                 payload={"error": "invalid_image_response", "message": task.failure_reason or "missing image URLs"},
                 headers=raw_response.headers,
             )
-        usage: Final = task.usage
-        input_tokens: Final = max(0, usage.total_tokens - usage.output_tokens) if usage is not None else 0
         return ImageResponse(
             data=[ImageObject(url=url) for url in task.image_urls],
-            usage=ImageUsage(
-                input_tokens=input_tokens,
-                input_tokens_details=ImageUsageInputTokensDetails(image_tokens=0, text_tokens=input_tokens),
-                output_tokens=usage.output_tokens if usage is not None else 0,
-                total_tokens=usage.total_tokens if usage is not None else 0,
-            ),
+            usage=_image_usage(task.usage),
         )
 
     def get_error_class(

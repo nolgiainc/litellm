@@ -86,6 +86,31 @@ class SeeGenUsage(BaseModel):
     total_tokens: int = Field(ge=0)
 
 
+class SeeGenGptTokenDetails(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    text_tokens: int = Field(ge=0, default=0)
+    image_tokens: int = Field(ge=0, default=0)
+
+
+class SeeGenGptRawUsage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    input_tokens: int = Field(ge=0, default=0)
+    output_tokens: int = Field(ge=0, default=0)
+    total_tokens: int = Field(ge=0, default=0)
+    cached_tokens: int = Field(ge=0, default=0)
+    input_tokens_details: SeeGenGptTokenDetails | None = None
+    output_tokens_details: SeeGenGptTokenDetails | None = None
+
+
+class SeeGenGptUsage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    raw_usage: SeeGenGptRawUsage | None = Field(default=None, alias="rawUsage")
+    image_count: int = Field(ge=0, default=0, alias="imageCount")
+
+
 class SeeGenSubmittedTask(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -101,7 +126,7 @@ class SeeGenPolledTask(BaseModel):
     task_id: str = Field(pattern=r"^img-[A-Za-z0-9_-]+$")
     status: Literal["processing", "done", "failed"]
     image_urls: tuple[str, ...] = ()
-    usage: SeeGenUsage | None = None
+    usage: SeeGenUsage | SeeGenGptUsage | None = None
     failure_reason: str | None = None
 
 
