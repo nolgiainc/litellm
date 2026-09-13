@@ -35,11 +35,11 @@ if TYPE_CHECKING:
     import tiktoken
 from .parameters import (
     SeeGenModelFamily,
-    map_openai_params as map_seegen_openai_params,
     seegen_model_family,
     seegen_model_name,
     supported_openai_params,
 )
+from .parameters import map_openai_params as map_seegen_openai_params
 
 
 def _image_usage(usage: SeeGenUsage | SeeGenGptUsage | None) -> ImageUsage:
