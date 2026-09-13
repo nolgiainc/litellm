@@ -81,7 +81,7 @@ def test_provider_routing_config_and_pricing_are_registered() -> None:
             assert prices[model]["input_cost_per_token"] == 0.000005
             assert prices[model]["cache_read_input_token_cost"] == 0.00000125
             assert prices[model]["input_cost_per_image_token"] == 0.000008
-            assert prices[model]["cache_read_input_image_token_cost"] == 0.000002
+            assert "cache_read_input_image_token_cost" not in prices[model]
             assert prices[model]["output_cost_per_image_token"] == 0.00003
 
 

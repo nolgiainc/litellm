@@ -9200,6 +9200,15 @@ class ProviderConfigManager:
             from litellm.llms.topaz.videos.transformation import TopazVideoConfig
 
             return TopazVideoConfig()
+        elif LlmProviders.SEEGEN == provider:
+            if model is not None and "seedance" in model:
+                from litellm.llms.seegen.videos import SeeGenSeedanceVideoConfig
+
+                return SeeGenSeedanceVideoConfig(model)
+            if model is not None and (model.startswith("happyhorse") or "wan3.0" in model):
+                from litellm.llms.seegen.videos import SeeGenDashScopeVideoConfig
+
+                return SeeGenDashScopeVideoConfig(model)
         elif LlmProviders.HOSTED_VLLM == provider:
             from litellm.llms.hosted_vllm.videos import get_hosted_vllm_video_config
 
