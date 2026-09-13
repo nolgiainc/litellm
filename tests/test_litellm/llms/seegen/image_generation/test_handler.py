@@ -174,10 +174,11 @@ async def test_terminal_poll_error_preserves_http_status(status_code: int, async
     client = MagicMock()
     client.get = AsyncMock(return_value=response) if asynchronous else MagicMock(return_value=response)
 
-    with pytest.raises(SeeGenError, match="upstream rejected polling") as exc_info:
-        if asynchronous:
+    if asynchronous:
+        with pytest.raises(SeeGenError, match="upstream rejected polling") as exc_info:
             await poller.poll_async(request, client)
-        else:
+    else:
+        with pytest.raises(SeeGenError, match="upstream rejected polling") as exc_info:
             poller.poll_sync(request, client)
 
     assert exc_info.value.status_code == status_code
