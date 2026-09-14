@@ -1,3 +1,4 @@
+import math
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
@@ -69,12 +70,55 @@ def media_urls(value: JsonValue | None, name: str) -> tuple[str, ...]:
     raise SeeGenError(status_code=400, message=f"{name} must be a URL or list of URLs")
 
 
+# Seedance's own output geometry per resolution tier and ratio (the sizes the
+# platform pins per tier x aspect and sends as the OpenAI-standard `size`).
+# SIZE_OPTIONS above lists the 16:9 / 9:16 pair per tier; the other four
+# ratios Seedance serves (4:3, 3:4, 1:1, 21:9) share each tier's pixel
+# budget, so a `size` is resolved by nearest ratio and nearest tier area
+# rather than by an exact-string table that only knew two ratios (#82).
+_RATIO_VALUES: Final[Mapping[str, float]] = MappingProxyType(
+    {"16:9": 16 / 9, "9:16": 9 / 16, "4:3": 4 / 3, "3:4": 3 / 4, "1:1": 1.0, "21:9": 21 / 9}
+)
+_TIER_AREAS: Final[Mapping[str, int]] = MappingProxyType(
+    {"480p": 854 * 480, "720p": 1280 * 720, "1080p": 1920 * 1080, "2K": 2560 * 1440, "4K": 3840 * 2160}
+)
+# A size whose aspect is further than this (in log space, ~6%) from every
+# ratio Seedance serves, or whose area sits between tiers, is refused rather
+# than silently rounded to a geometry the caller did not ask for.
+_RATIO_TOLERANCE: Final = 0.06
+_AREA_TOLERANCE: Final = 0.12
+
+
+def resolve_size(size: str) -> tuple[str, str]:
+    """Map a WIDTHxHEIGHT `size` onto Seedance's (ratio, resolution) pair."""
+    exact = SIZE_OPTIONS.get(size)
+    if exact is not None:
+        return exact
+    width_text, separator, height_text = size.partition("x")
+    if separator != "x" or not width_text.isdigit() or not height_text.isdigit():
+        raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
+    width, height = int(width_text), int(height_text)
+    if width <= 0 or height <= 0:
+        raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
+    aspect: Final = math.log(width / height)
+    ratio, ratio_distance = min(
+        ((name, abs(aspect - math.log(value))) for name, value in _RATIO_VALUES.items()), key=lambda item: item[1]
+    )
+    area: Final = math.log(width * height)
+    resolution, area_distance = min(
+        ((name, abs(area - math.log(pixels))) for name, pixels in _TIER_AREAS.items()), key=lambda item: item[1]
+    )
+    if ratio_distance > _RATIO_TOLERANCE or area_distance > _AREA_TOLERANCE:
+        raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
+    return ratio, resolution
+
+
 def _size_params(params: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
     size: Final = params.get("size")
     if size is not None:
-        if not isinstance(size, str) or size not in SIZE_OPTIONS:
+        if not isinstance(size, str):
             raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
-        ratio, resolution = SIZE_OPTIONS[size]
+        ratio, resolution = resolve_size(size)
         return MappingProxyType({"ratio": ratio, "resolution": resolution})
     ratio_params: Final[Mapping[str, JsonValue]] = (
         MappingProxyType({"ratio": params["ratio"]}) if "ratio" in params else EMPTY_JSON_OBJECT
