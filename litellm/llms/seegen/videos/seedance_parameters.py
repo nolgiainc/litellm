@@ -91,7 +91,7 @@ _AREA_TOLERANCE: Final = 0.12
 
 def resolve_size(size: str) -> tuple[str, str]:
     """Map a WIDTHxHEIGHT `size` onto Seedance's (ratio, resolution) pair."""
-    exact = SIZE_OPTIONS.get(size)
+    exact: Final = SIZE_OPTIONS.get(size)
     if exact is not None:
         return exact
     width_text, separator, height_text = size.partition("x")
