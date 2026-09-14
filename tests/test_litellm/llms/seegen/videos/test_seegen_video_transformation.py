@@ -90,10 +90,9 @@ def test_environment_reuses_seegen_auth_and_family_specific_headers(
     assert "X-DashScope-Async" not in wan_headers
 
 
-# The platform pins one exact WIDTHxHEIGHT per tier x aspect for Seedance 2.5
-# and sends it as the OpenAI-standard `size`. Every one of the twelve must
-# resolve to Seedance's (ratio, resolution) pair; only 16:9 / 9:16 did before
-# #82, so 4:3, 3:4, 1:1 and 21:9 requests were refused as an unsupported size.
+# Keep the twelve platform sizes aligned with nolgia-api's
+# seedance25QualityCapabilities.Sizes in internal/generation/quality.go.
+# The higher-tier sizes preserve the provider's existing support.
 @pytest.mark.parametrize(
     ("size", "ratio", "resolution"),
     [
@@ -111,7 +110,10 @@ def test_environment_reuses_seegen_auth_and_family_specific_headers(
         ("1470x630", "21:9", "720p"),
         ("1920x1080", "16:9", "1080p"),
         ("1080x1920", "9:16", "1080p"),
+        ("2560x1440", "16:9", "2K"),
+        ("1440x2560", "9:16", "2K"),
         ("3840x2160", "16:9", "4K"),
+        ("2160x3840", "9:16", "4K"),
     ],
 )
 def test_seedance_size_resolves_every_platform_geometry(size: str, ratio: str, resolution: str) -> None:
@@ -126,15 +128,34 @@ def test_seedance_size_resolves_every_platform_geometry(size: str, ratio: str, r
     assert body["resolution"] == resolution
 
 
-@pytest.mark.parametrize("size", ["640x481", "1600x1600", "300x300", "abc", "0x0", "640x", "x640"])
-def test_seedance_size_refuses_geometry_off_every_tier_or_ratio(size: str) -> None:
-    with pytest.raises(SeeGenError, match="Unsupported Seedance size"):
+@pytest.mark.parametrize(
+    "size",
+    [
+        "1000x1000",
+        "961x960",
+        "1281x720",
+        "640x481",
+        "1600x1600",
+        "300x300",
+        "abc",
+        "0x0",
+        "640x",
+        "x640",
+        "²x²",
+        pytest.param("9" * 5000 + "x640", id="oversized-width"),
+        pytest.param("640x" + "9" * 5000, id="oversized-height"),
+    ],
+)
+def test_seedance_size_refuses_unlisted_or_malformed_geometry(size: str) -> None:
+    with pytest.raises(SeeGenError, match="Unsupported Seedance size") as exc_info:
         _transform_create(
             SeeGenSeedanceVideoConfig(SEEDANCE_MODEL),
             SEEDANCE_MODEL,
             "A quiet shoreline",
             {"size": size, "seconds": "4"},
         )
+
+    assert exc_info.value.status_code == 400
 
 
 def test_seedance_request_maps_openai_params_and_reference_roles() -> None:
