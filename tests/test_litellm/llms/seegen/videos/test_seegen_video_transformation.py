@@ -90,6 +90,74 @@ def test_environment_reuses_seegen_auth_and_family_specific_headers(
     assert "X-DashScope-Async" not in wan_headers
 
 
+# Keep the twelve platform sizes aligned with nolgia-api's
+# seedance25QualityCapabilities.Sizes in internal/generation/quality.go.
+# The higher-tier sizes preserve the provider's existing support.
+@pytest.mark.parametrize(
+    ("size", "ratio", "resolution"),
+    [
+        ("854x480", "16:9", "480p"),
+        ("752x560", "4:3", "480p"),
+        ("640x640", "1:1", "480p"),
+        ("560x752", "3:4", "480p"),
+        ("480x854", "9:16", "480p"),
+        ("992x432", "21:9", "480p"),
+        ("1280x720", "16:9", "720p"),
+        ("1112x834", "4:3", "720p"),
+        ("960x960", "1:1", "720p"),
+        ("834x1112", "3:4", "720p"),
+        ("720x1280", "9:16", "720p"),
+        ("1470x630", "21:9", "720p"),
+        ("1920x1080", "16:9", "1080p"),
+        ("1080x1920", "9:16", "1080p"),
+        ("2560x1440", "16:9", "2K"),
+        ("1440x2560", "9:16", "2K"),
+        ("3840x2160", "16:9", "4K"),
+        ("2160x3840", "9:16", "4K"),
+    ],
+)
+def test_seedance_size_resolves_every_platform_geometry(size: str, ratio: str, resolution: str) -> None:
+    body, _, _ = _transform_create(
+        SeeGenSeedanceVideoConfig(SEEDANCE_MODEL),
+        SEEDANCE_MODEL,
+        "A quiet shoreline",
+        {"size": size, "seconds": "4"},
+    )
+
+    assert body["ratio"] == ratio
+    assert body["resolution"] == resolution
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        "1000x1000",
+        "961x960",
+        "1281x720",
+        "640x481",
+        "1600x1600",
+        "300x300",
+        "abc",
+        "0x0",
+        "640x",
+        "x640",
+        "²x²",
+        pytest.param("9" * 5000 + "x640", id="oversized-width"),
+        pytest.param("640x" + "9" * 5000, id="oversized-height"),
+    ],
+)
+def test_seedance_size_refuses_unlisted_or_malformed_geometry(size: str) -> None:
+    with pytest.raises(SeeGenError, match="Unsupported Seedance size") as exc_info:
+        _transform_create(
+            SeeGenSeedanceVideoConfig(SEEDANCE_MODEL),
+            SEEDANCE_MODEL,
+            "A quiet shoreline",
+            {"size": size, "seconds": "4"},
+        )
+
+    assert exc_info.value.status_code == 400
+
+
 def test_seedance_request_maps_openai_params_and_reference_roles() -> None:
     config = SeeGenSeedanceVideoConfig(SEEDANCE_MODEL)
     body, files, url = _transform_create(

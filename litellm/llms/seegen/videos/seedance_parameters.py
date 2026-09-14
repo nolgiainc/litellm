@@ -11,8 +11,16 @@ SIZE_OPTIONS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
     {
         "854x480": ("16:9", "480p"),
         "480x854": ("9:16", "480p"),
+        "752x560": ("4:3", "480p"),
+        "560x752": ("3:4", "480p"),
+        "640x640": ("1:1", "480p"),
+        "992x432": ("21:9", "480p"),
         "1280x720": ("16:9", "720p"),
         "720x1280": ("9:16", "720p"),
+        "1112x834": ("4:3", "720p"),
+        "834x1112": ("3:4", "720p"),
+        "960x960": ("1:1", "720p"),
+        "1470x630": ("21:9", "720p"),
         "1920x1080": ("16:9", "1080p"),
         "1080x1920": ("9:16", "1080p"),
         "2560x1440": ("16:9", "2K"),
@@ -69,12 +77,20 @@ def media_urls(value: JsonValue | None, name: str) -> tuple[str, ...]:
     raise SeeGenError(status_code=400, message=f"{name} must be a URL or list of URLs")
 
 
+def resolve_size(size: str) -> tuple[str, str]:
+    """Map an exact WIDTHxHEIGHT `size` onto Seedance's (ratio, resolution) pair."""
+    exact: Final = SIZE_OPTIONS.get(size)
+    if exact is None:
+        raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
+    return exact
+
+
 def _size_params(params: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
     size: Final = params.get("size")
     if size is not None:
-        if not isinstance(size, str) or size not in SIZE_OPTIONS:
+        if not isinstance(size, str):
             raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
-        ratio, resolution = SIZE_OPTIONS[size]
+        ratio, resolution = resolve_size(size)
         return MappingProxyType({"ratio": ratio, "resolution": resolution})
     ratio_params: Final[Mapping[str, JsonValue]] = (
         MappingProxyType({"ratio": params["ratio"]}) if "ratio" in params else EMPTY_JSON_OBJECT
