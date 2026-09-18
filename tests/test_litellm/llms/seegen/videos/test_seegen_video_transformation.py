@@ -288,6 +288,56 @@ def test_seedance_status_mapping_and_token_usage(status: str, expected: str) -> 
 
 
 @pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (
+            {
+                "code": "InputImageSensitiveContentDetected.PrivacyInformation",
+                "message": "content[1]: The request failed because the input image may be related to copyright restrictions.",
+            },
+            "InputImageSensitiveContentDetected.PrivacyInformation",
+        ),
+        (
+            {
+                "code": "OutputVideoSensitiveContentDetected.PolicyViolation",
+                "message": "The request failed because the output video may be related to copyright restrictions.",
+            },
+            "OutputVideoSensitiveContentDetected.PolicyViolation",
+        ),
+        ({"message": "render failed"}, "failed"),
+        ("render failed", "failed"),
+        (None, "failed"),
+    ],
+)
+def test_seedance_failed_task_forwards_arks_error_code(error: JsonValue, expected_code: str) -> None:
+    """Ark names WHY a task failed in error.code (NOL-825).
+
+    The platform's refund and likeness classification keys on that code
+    (InputImageSensitiveContentDetected.* is an input refusal, the Output*
+    twin is post-render moderation) because the sentence beside it changes
+    wording between refusals. Surfacing the lifecycle status instead threw
+    the code away and every refusal read as an ordinary render failure.
+    """
+    config = SeeGenSeedanceVideoConfig(SEEDANCE_MODEL)
+    payload: dict[str, JsonValue] = {"id": "cgt-123", "status": "failed"}
+    if error is not None:
+        payload["error"] = error
+    video = config.transform_video_status_retrieve_response(
+        raw_response=_response(payload),
+        logging_obj=Mock(),
+        custom_llm_provider="seegen",
+    )
+
+    assert video.status == "failed"
+    assert video.error is not None
+    assert video.error["code"] == expected_code
+    if isinstance(error, dict) and error.get("message"):
+        assert video.error["message"] == error["message"]
+    if error == "render failed":
+        assert video.error["message"] == "render failed"
+
+
+@pytest.mark.parametrize(
     "content",
     [
         [{"type": "video_url", "video_url": {"url": "https://cdn.example/result.mp4"}}],
