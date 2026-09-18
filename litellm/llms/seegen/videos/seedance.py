@@ -67,6 +67,7 @@ class _SubmitResponse(BaseModel):
 class _TaskError(BaseModel):
     model_config = ConfigDict(frozen=True, extra="ignore")
 
+    code: str | None = None
     message: str | None = None
 
 
@@ -80,6 +81,23 @@ class _TaskResponse(BaseModel):
     message: str | None = None
     failure_reason: str | None = None
     error: str | _TaskError | None = None
+
+
+def _failure_code(task: _TaskResponse) -> str:
+    """The provider's own error code when Ark sent one, else the lifecycle status.
+
+    Ark names WHY a task failed in ``error.code`` (for example
+    ``InputImageSensitiveContentDetected.PrivacyInformation`` for a reference
+    its checker refused, ``OutputVideoSensitiveContentDetected.PolicyViolation``
+    for a clip it moderated after rendering). That code is the only stable
+    discriminator between the two: the human sentence next to it changes
+    wording between refusals. Surfacing ``task.status`` here instead threw
+    it away, so the platform could not tell an input refusal from a render
+    failure.
+    """
+    if isinstance(task.error, _TaskError) and task.error.code:
+        return task.error.code
+    return task.status
 
 
 def _failure_message(task: _TaskResponse) -> str:
@@ -273,7 +291,9 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
             else "failed"
         )
         error: Final[Mapping[str, JsonValue] | None] = (
-            MappingProxyType({"code": task.status, "message": _failure_message(task)}) if status == "failed" else None
+            MappingProxyType({"code": _failure_code(task), "message": _failure_message(task)})
+            if status == "failed"
+            else None
         )
         usage: Final = (
             parse_json_mapping(
