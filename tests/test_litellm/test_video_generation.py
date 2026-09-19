@@ -2351,61 +2351,6 @@ def video_proxy_test_client():
     return TestClient(app)
 
 
-def test_bria_unverified_source_duration_returns_http_400_without_provider_post(
-    video_proxy_test_client, monkeypatch
-):
-    from litellm.llms.custom_httpx.http_handler import HTTPHandler
-    from litellm.proxy import proxy_server
-    from litellm.proxy._types import ProxyException, UserAPIKeyAuth
-    from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
-    from litellm.proxy.utils import ProxyLogging
-
-    app = video_proxy_test_client.app
-    monkeypatch.setitem(
-        app.dependency_overrides,
-        user_api_key_auth,
-        lambda: UserAPIKeyAuth(api_key="sk-test"),
-    )
-    app.add_exception_handler(ProxyException, proxy_server.openai_exception_handler)
-
-    logging = MagicMock(spec=ProxyLogging)
-    logging.pre_call_hook = AsyncMock(side_effect=lambda **kwargs: kwargs["data"])
-    logging.during_call_hook = AsyncMock(return_value=None)
-    logging.post_call_failure_hook = AsyncMock(return_value=None)
-    logging.post_call_response_headers_hook = AsyncMock(return_value={})
-    monkeypatch.setattr(proxy_server, "proxy_logging_obj", logging)
-    monkeypatch.setattr(proxy_server, "llm_router", None)
-    monkeypatch.setattr(proxy_server, "general_settings", {})
-    for name in (
-        "user_model",
-        "user_temperature",
-        "user_request_timeout",
-        "user_max_tokens",
-        "user_api_base",
-    ):
-        monkeypatch.setattr(proxy_server, name, None)
-
-    sync_post = MagicMock(side_effect=AssertionError("Unexpected provider POST"))
-    async_post = AsyncMock(side_effect=AssertionError("Unexpected provider POST"))
-    monkeypatch.setattr(HTTPHandler, "post", sync_post)
-    monkeypatch.setattr(AsyncHTTPHandler, "post", async_post)
-
-    response = video_proxy_test_client.post(
-        "/v1/videos",
-        json={
-            "model": "fal_ai/bria/video/background-removal/v3",
-            "api_key": "fake-fal-key",
-            "input_reference": "https://example.com/sixty-seconds.mp4",
-            "seconds": "1",
-        },
-    )
-
-    assert response.status_code == 400, response.text
-    assert "source duration is verified" in response.json()["error"]["message"]
-    sync_post.assert_not_called()
-    async_post.assert_not_called()
-
-
 def test_character_id_encode_decode_roundtrip():
     from litellm.types.videos.utils import (
         decode_character_id_with_provider,

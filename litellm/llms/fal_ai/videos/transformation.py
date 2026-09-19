@@ -2,6 +2,7 @@ import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, loads
+from math import isfinite
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 import httpx
@@ -91,6 +92,9 @@ _REFERENCE_FIELD_BY_MODEL_MARKER: tuple[tuple[str, _ReferenceField], ...] = (
 
 _MESH_MODEL_MARKERS: Final = ("hunyuan3d", "trellis", "hyper3d")
 _BACKGROUND_REMOVAL_MODEL_MARKER: Final = "bria/video/background-removal"
+_BACKGROUND_REMOVAL_SECONDS_MESSAGE: Final = (
+    "Bria background removal requires positive source clip seconds for cost tracking"
+)
 _PROMPTLESS_MODEL_MARKERS: Final = ("seedvr/upscale/video", _BACKGROUND_REMOVAL_MODEL_MARKER, *_MESH_MODEL_MARKERS)
 
 # Resolution knobs whose value selects the billed output tier for megapixel-priced apps.
@@ -507,15 +511,34 @@ class FalAIVideoConfig(BaseVideoConfig):
         request_data.pop("model", None)
 
         if _BACKGROUND_REMOVAL_MODEL_MARKER in model_id.lower():
-            # Caller seconds and a separate URL probe cannot attest to the bytes Fal bills.
-            raise litellm.BadRequestError(
-                message=(
-                    "Bria video background removal is unavailable until source duration is verified "
-                    "against immutable media in the trusted billing layer"
-                ),
-                model=model,
-                llm_provider="fal_ai",
+            unsupported: Final = (
+                frozenset(("aspect_ratio", "resolution", "target_resolution", "size")) & request_data.keys()
             )
+            if unsupported:
+                raise ValueError(f"Bria background removal does not support: {', '.join(sorted(unsupported))}")
+            request_data.pop("prompt", None)
+            # Both provider defaults destroy transparency: background_color
+            # defaults to "Black", which returns an opaque composite rather than
+            # a matte. Verified on the wire 2026-09-19.
+            request_data.setdefault("background_color", "Transparent")
+            request_data.setdefault("output_container_and_codec", "webm_vp9")
+            video_url: Final = request_data.get("video_url")
+            if isinstance(video_url, str) and video_url.strip().lower().startswith("data:"):
+                raise ValueError("Bria background removal requires a hosted video_url; data URIs are unsupported")
+            # fal bills the source clip and its queue response supplies no
+            # duration, so a submission without one could only ever record $0
+            # (the NOL-519 class). Refuse it here, before the job exists.
+            # Annotated `object` because request_data is untyped JSON: the value
+            # has to be narrowed before it can be coerced.
+            raw_duration: Final[object] = request_data.get("duration")
+            if not isinstance(raw_duration, (str, int, float)) or isinstance(raw_duration, bool):
+                raise ValueError(_BACKGROUND_REMOVAL_SECONDS_MESSAGE)
+            try:
+                seconds: Final = float(raw_duration)
+            except ValueError as exc:
+                raise ValueError(_BACKGROUND_REMOVAL_SECONDS_MESSAGE) from exc
+            if not isfinite(seconds) or seconds <= 0:
+                raise ValueError(_BACKGROUND_REMOVAL_SECONDS_MESSAGE)
 
         return request_data, [], f"{api_base}/{model_id}"
 
