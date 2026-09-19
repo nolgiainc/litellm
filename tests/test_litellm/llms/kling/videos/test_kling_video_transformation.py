@@ -984,3 +984,257 @@ class TestKlingMotionControl:
                 "kling/kling-v3-motion-control",
                 False,
             )
+
+
+class TestKlingCatalogConstraints:
+    @pytest.mark.parametrize("model", ("kling/kling-v2-6", "kling/kling-v2-5-turbo"))
+    @pytest.mark.parametrize("resolution,mode", (("720p", "std"), ("1080p", "pro")))
+    @pytest.mark.parametrize("seconds", (5, 10))
+    @pytest.mark.parametrize("image", (None, "https://img/start.png"))
+    def test_silent_wire_body(self, model: str, resolution: str, mode: str, seconds: int, image: str | None) -> None:
+        config: Final = KlingVideoConfig()
+        mapped: Final = config.map_openai_params(
+            {
+                "seconds": seconds,
+                "input_reference": image,
+                "generate_audio": False,
+                "extra_body": {"resolution": resolution},
+            },
+            model,
+            False,
+        )
+        data, _, url = config.transform_video_create_request(
+            model, "a cat", API_BASE, mapped, GenericLiteLLMParams(), {}
+        )
+        assert data == {
+            "model_name": model.removeprefix("kling/"),
+            "prompt": "a cat",
+            "duration": str(seconds),
+            "mode": mode,
+            "sound": "off",
+            **({"image": image} if image else {}),
+        }
+        assert url == f"{API_BASE}/videos/{'image2video' if image else 'text2video'}"
+
+    @pytest.mark.parametrize("model", ("kling-v2-6", "kling-v2-5-turbo"))
+    @pytest.mark.parametrize("mode,error", (("4k", "publishes no 4K tier"), ("zzz", "does not support mode")))
+    def test_rejects_mode(self, model: str, mode: str, error: str) -> None:
+        with pytest.raises(litellm.BadRequestError, match=f"{model}.*{error}"):
+            KlingVideoConfig().map_openai_params({"extra_body": {"mode": mode}}, model, False)
+
+    @pytest.mark.parametrize("model", ("kling-v2-6", "kling-v2-5-turbo"))
+    @pytest.mark.parametrize("seconds", (3, 7, 15, 20, 5.5, True, "bogus", "nan"))
+    def test_rejects_duration(self, model: str, seconds: str | float) -> None:
+        with pytest.raises(litellm.BadRequestError, match=f"{model}.*only 5 and 10 second clips"):
+            KlingVideoConfig().map_openai_params({"seconds": seconds}, model, False)
+
+    @pytest.mark.parametrize(
+        "model,error",
+        (
+            ("kling-v2-6", r"allows audio only at pro.*1.0 U/s against 0.5 silent.*per-resolution price map"),
+            ("kling-v2-5-turbo", "vendor accepts.*publishes no price.*billed at the silent rate it did not produce"),
+        ),
+    )
+    @pytest.mark.parametrize("mode", ("std", "pro"))
+    @pytest.mark.parametrize("raw_sound", (True, False))
+    def test_rejects_unpriceable_audio(self, model: str, error: str, mode: str, raw_sound: bool) -> None:
+        with pytest.raises(litellm.BadRequestError, match=f"{model}.*{error}"):
+            KlingVideoConfig().map_openai_params(
+                {
+                    "generate_audio": not raw_sound,
+                    "extra_body": {"mode": mode, **({"sound": "on"} if raw_sound else {})},
+                },
+                model,
+                False,
+            )
+
+    @pytest.mark.parametrize("prefix", ("", "kling/"))
+    @pytest.mark.parametrize(
+        "model,audio", (("kling-v3", True), ("kling-v2-6", False), ("kling-v2-5-turbo", False), ("unknown", True))
+    )
+    def test_declared_audio_support(self, prefix: str, model: str, audio: bool) -> None:
+        config: Final = KlingVideoConfig()
+        support: Final = config.get_capability_param_support(prefix + model)
+        assert isinstance(support, DeclaredCapabilityParams)
+        assert ("generate_audio" in support.supported) is audio
+        assert ("generate_audio" in config.get_supported_openai_params(prefix + model)) is audio
+
+    @pytest.mark.parametrize("seconds", range(3, 16))
+    @pytest.mark.parametrize("mode", ("std", "pro", "4k"))
+    def test_v3_allowed_range_and_sound(self, seconds: int, mode: str) -> None:
+        mapped: Final = KlingVideoConfig().map_openai_params(
+            {"seconds": seconds, "generate_audio": True, "extra_body": {"mode": mode}}, MODEL, False
+        )
+        assert mapped == {"duration": str(seconds), "mode": mode, "sound": "on"}
+
+    @pytest.mark.parametrize("seconds", (2, 20, 3.5))
+    def test_v3_rejects_duration(self, seconds: float) -> None:
+        with pytest.raises(litellm.BadRequestError, match="integer seconds value from 3 through 15"):
+            KlingVideoConfig().map_openai_params({"seconds": seconds}, MODEL, False)
+
+
+class TestKlingAvatar:
+    @pytest.mark.parametrize("resolution,mode", ((None, "std"), ("720p", "std"), ("1080p", "pro")))
+    def test_avatar_wire_body(self, resolution: str | None, mode: str) -> None:
+        config: Final = KlingVideoConfig()
+        mapped: Final = config.map_openai_params(
+            {
+                "seconds": "5.5",
+                "input_reference": "https://img/fallback.png",
+                "extra_body": {
+                    "image_urls": ["https://img/portrait.png"],
+                    "image_url": "https://img/last.png",
+                    "audio_urls": ["https://audio/voice.mp3"],
+                    **({"resolution": resolution} if resolution else {}),
+                    "watermark_info": {"enabled": True},
+                    "callback_url": "https://callback/result",
+                    "external_task_id": "external-1",
+                    "model_name": "ignored",
+                    "duration": "10",
+                },
+            },
+            "kling/kling-avatar",
+            False,
+        )
+        data, files, url = config.transform_video_create_request(
+            "kling/kling-avatar", "speak", API_BASE, mapped, GenericLiteLLMParams(), {}
+        )
+        assert mapped["seconds"] == "5.5"
+        assert data == {
+            "image": "https://img/portrait.png",
+            "sound_file": "https://audio/voice.mp3",
+            "mode": mode,
+            "prompt": "speak",
+            "watermark_info": {"enabled": True},
+            "callback_url": "https://callback/result",
+            "external_task_id": "external-1",
+        }
+        assert files == ()
+        assert url == f"{API_BASE}/videos/avatar/image2video"
+
+    @pytest.mark.parametrize("field", ("input_reference", "image_url", "image_urls"))
+    @pytest.mark.parametrize("image", ("https://img/portrait.png", b"portrait", ("portrait.png", b"portrait")))
+    def test_image_aliases(self, field: str, image: str | bytes | tuple[str, bytes]) -> None:
+        mapped: Final = KlingVideoConfig().map_openai_params(
+            {
+                "seconds": 5,
+                "extra_body": {field: [image] if field == "image_urls" else image, "audio_urls": "https://audio/a"},
+            },
+            "kling-avatar",
+            False,
+        )
+        assert mapped["image"] == (image if isinstance(image, str) else base64.b64encode(b"portrait").decode())
+        assert mapped["sound_file"] == "https://audio/a"
+
+    @pytest.mark.parametrize("seconds", (None, 0, -1, "", "bogus", "nan", "inf", True))
+    def test_rejects_unpriced_duration(self, seconds: str | int | None) -> None:
+        with pytest.raises(litellm.BadRequestError, match=r"voice track.*positive seconds"):
+            KlingVideoConfig().map_openai_params(
+                {
+                    "seconds": seconds,
+                    "input_reference": "https://img/a",
+                    "extra_body": {"audio_urls": ["https://audio/a"]},
+                },
+                "kling/kling-avatar",
+                False,
+            )
+
+    @pytest.mark.parametrize("resolution", ("4k", "4K", "8k"))
+    def test_rejects_unpriced_resolution(self, resolution: str) -> None:
+        with pytest.raises(litellm.BadRequestError, match="accepts 4K avatar mode but publishes no 4K avatar price"):
+            KlingVideoConfig().map_openai_params({"extra_body": {"resolution": resolution}}, "kling-avatar", False)
+
+    @pytest.mark.parametrize(
+        "images,audio,error",
+        (
+            ((), ("https://audio/a",), "portrait.*image_urls.*input_reference.*image_url"),
+            ((" ",), ("https://audio/a",), "portrait"),
+            (("https://img/a", "https://img/b"), ("https://audio/a",), "got 2 images"),
+            (("https://img/a",), (), "exactly one voice track via audio_urls"),
+            (("https://img/a",), (" ",), "audio_urls"),
+            (("https://img/a",), ("https://audio/a", "https://audio/b"), "audio_urls"),
+        ),
+    )
+    def test_rejects_media(self, images: tuple[str, ...], audio: tuple[str, ...], error: str) -> None:
+        with pytest.raises(litellm.BadRequestError, match=error):
+            KlingVideoConfig().map_openai_params(
+                {"seconds": 5, "extra_body": {"image_urls": images, "audio_urls": audio}}, "kling-avatar", False
+            )
+
+    def test_capabilities(self) -> None:
+        config: Final = KlingVideoConfig()
+        support: Final = config.get_capability_param_support("kling/kling-avatar")
+        assert isinstance(support, DeclaredCapabilityParams)
+        assert support.supported == frozenset(("input_reference", "image_url", "image_urls", "audio_urls"))
+        assert "generate_audio" not in config.get_supported_openai_params("kling/kling-avatar")
+        assert config.supports_promptless_video_create("kling/kling-avatar")
+
+    @pytest.mark.parametrize("mode,resolution", (("std", "720p"), ("pro", "1080p")))
+    def test_response_polling_and_usage(self, mode: str, resolution: str) -> None:
+        config: Final = KlingVideoConfig()
+        response: Final = _status_response(
+            {"code": 0, "data": {"task_id": "avatar-1", "task_status": "succeed"}}, "avatar/image2video", "avatar-1"
+        )
+        created: Final = config.transform_video_create_response(
+            "kling/kling-avatar", response, Mock(optional_params={"seconds": "5.5"}), "kling", {"mode": mode}
+        )
+        assert created.usage == {"video_resolution": resolution, "duration_seconds": 5.5}
+        assert decode_video_id_with_provider(created.id)["model_id"] == "avatar/image2video"
+        assert "/" not in created.id
+        assert config.transform_video_status_retrieve_request(created.id, API_BASE, GenericLiteLLMParams(), {}) == (
+            f"{API_BASE}/videos/avatar/image2video/avatar-1",
+            {},
+        )
+        polled: Final = config.transform_video_status_retrieve_response(response, Mock(), "kling")
+        assert polled.id == created.id
+        assert polled.status == "completed"
+        assert config.transform_video_content_request(polled.id, API_BASE, GenericLiteLLMParams(), {}) == (
+            f"{API_BASE}/videos/avatar/image2video/avatar-1",
+            {},
+        )
+
+    @pytest.mark.parametrize("optional_params", ({}, None))
+    def test_missing_logged_seconds_degrades(self, optional_params: object) -> None:
+        created: Final = KlingVideoConfig().transform_video_create_response(
+            "kling/kling-avatar",
+            _status_response({"code": 0, "data": {"task_id": "avatar-1"}}),
+            Mock(optional_params=optional_params),
+            "kling",
+            {"mode": "std"},
+        )
+        assert created.status == "queued"
+        assert created.usage == {"video_resolution": "720p"}
+
+    @pytest.mark.parametrize("resolution,mode", (("720p", "std"), ("1080p", "pro")))
+    @pytest.mark.parametrize("prompt", ("", "speak"))
+    def test_sdk_request(self, resolution: str, mode: str, prompt: str) -> None:
+        from litellm.llms.custom_httpx.http_handler import HTTPHandler
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            import json
+
+            assert request.method == "POST"
+            assert str(request.url) == f"{API_BASE}/videos/avatar/image2video"
+            assert json.loads(request.content) == {
+                "image": "https://img/portrait.png",
+                "sound_file": "https://audio/voice.mp3",
+                "mode": mode,
+                **({"prompt": prompt} if prompt else {}),
+            }
+            return httpx.Response(200, json={"code": 0, "data": {"task_id": "avatar-sdk", "task_status": "submitted"}})
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            result: Final = litellm.video_generation(
+                model="kling/kling-avatar",
+                prompt=prompt,
+                seconds="5.5",
+                image_urls=["https://img/portrait.png"],
+                audio_urls=["https://audio/voice.mp3"],
+                resolution=resolution,
+                api_key="A" * 32 + ":" + "S" * 32,
+                api_base=API_BASE,
+                client=HTTPHandler(client=client),
+            )
+        assert isinstance(result, VideoObject)
+        assert result.status == "queued"
+        assert result.usage == {"video_resolution": resolution, "duration_seconds": 5.5}

@@ -264,3 +264,53 @@ class TestKlingImageCOGS:
 
         resp = ImageResponse(data=[ImageObject(url=f"https://cdn.kling.test/{i}.png") for i in range(3)])
         assert cost_calculator(model="kling-v3", image_response=resp) == pytest.approx(0.084)
+
+
+class TestKlingCatalogCOGS:
+    @pytest.mark.parametrize(
+        "model,rate_720p,rate_1080p",
+        (("kling-v2-6", 0.042, 0.07), ("kling-v2-5-turbo", 0.042, 0.07), ("kling-avatar", 0.056, 0.112)),
+    )
+    @pytest.mark.parametrize("resolution", ("720p", "1080p"))
+    def test_catalog_resolution_rates(self, model, rate_720p, rate_1080p, resolution):
+        from litellm.cost_calculator import completion_cost
+        from litellm.types.videos.main import VideoObject
+
+        response = VideoObject(
+            id="catalog-cost",
+            object="video",
+            status="queued",
+            model=f"kling/{model}",
+            usage={"duration_seconds": 5.5, "video_resolution": resolution},
+        )
+        rate = rate_720p if resolution == "720p" else rate_1080p
+        assert completion_cost(
+            completion_response=response,
+            model=f"kling/{model}",
+            custom_llm_provider="kling",
+            call_type="create_video",
+        ) == pytest.approx(5.5 * rate)
+        assert litellm.model_cost[f"kling/{model}"]["output_cost_per_second"] == rate_720p
+
+    @pytest.mark.parametrize(
+        "filename", ("model_prices_and_context_window.json", "litellm/model_prices_and_context_window_backup.json")
+    )
+    def test_price_maps_match(self, filename):
+        import json
+        from pathlib import Path
+
+        prices = json.loads((Path(__file__).resolve().parents[4] / filename).read_text())
+        for model, low, high in (
+            ("kling-v2-6", 0.042, 0.07),
+            ("kling-v2-5-turbo", 0.042, 0.07),
+            ("kling-avatar", 0.056, 0.112),
+        ):
+            assert prices[f"kling/{model}"] == {
+                "litellm_provider": "kling",
+                "mode": "video_generation",
+                "output_cost_per_second_720p": low,
+                "output_cost_per_second_1080p": high,
+                "output_cost_per_second": low,
+                "source": "https://kling.ai/document-api/pricing/base/video",
+                "supported_endpoints": ["/v1/videos"],
+            }
