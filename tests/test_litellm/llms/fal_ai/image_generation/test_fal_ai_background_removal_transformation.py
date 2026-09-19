@@ -194,10 +194,11 @@ async def test_promptless_proxy_dispatch_through_sdk_and_router(
 def test_other_image_models_still_require_prompt(
     model: str, prompt_form: Literal["omitted", "null", "positional_null"],
 ) -> None:
-    with pytest.raises(litellm.BadRequestError, match="requires a prompt"):
-        if prompt_form == "positional_null":
+    if prompt_form == "positional_null":
+        with pytest.raises(litellm.BadRequestError, match="requires a prompt"):
             litellm.image_generation(None, model, api_key="test-key")
-        else:
+    else:
+        with pytest.raises(litellm.BadRequestError, match="requires a prompt"):
             litellm.image_generation(
                 model=model, api_key="test-key",
                 **MappingProxyType({"prompt": None} if prompt_form == "null" else {}),

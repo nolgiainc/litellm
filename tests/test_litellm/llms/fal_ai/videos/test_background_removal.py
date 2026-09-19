@@ -54,13 +54,14 @@ async def test_public_creation_rejects_untrusted_duration_without_posting(monkey
     async_post = AsyncMock()
     monkeypatch.setattr(HTTPHandler, "post", sync_post)
     monkeypatch.setattr(AsyncHTTPHandler, "post", async_post)
-    with pytest.raises(litellm.BadRequestError, match="source duration is verified") as error:
-        if use_async:
+    if use_async:
+        with pytest.raises(litellm.BadRequestError, match="source duration is verified") as error:
             await litellm.avideo_generation(
                 model=f"fal_ai/{MODEL}", api_key="test-key",
                 input_reference="https://example.com/sixty-seconds.mp4", seconds="1",
             )
-        else:
+    else:
+        with pytest.raises(litellm.BadRequestError, match="source duration is verified") as error:
             litellm.video_generation(
                 model=f"fal_ai/{MODEL}", api_key="test-key",
                 input_reference="https://example.com/sixty-seconds.mp4", seconds="1",
