@@ -460,6 +460,17 @@ def test_content__non_webm_or_malformed_ebml_falls_back(content: bytes) -> None:
     assert endpoints._video_content_media_type(content) == ("video/mp4", "mp4")
 
 
+@pytest.mark.parametrize("doctype_first", (False, True))
+def test_content__webm_at_header_element_limit(doctype_first: bool) -> None:
+    padding: Final = b"\xec\x80" * 63
+    doctype: Final = b"\x42\x82\x84webm"
+    content: Final = b"\x1a\x45\xdf\xa3\x40\x85" + (
+        doctype + padding if doctype_first else padding + doctype
+    )
+
+    assert endpoints._video_content_media_type(content) == ("video/webm", "webm")
+
+
 def test_content__webm_bytearray() -> None:
     content: Final = bytearray(  # mutable-ok: exercise the helper's existing bytearray input contract
         b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm"

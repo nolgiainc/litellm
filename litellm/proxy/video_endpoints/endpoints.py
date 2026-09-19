@@ -798,25 +798,22 @@ def _ebml_element_bounds(content: bytes | bytearray, offset: int, limit: int) ->
     return element_id, data_offset, data_end
 
 
-def _ebml_header_doctype(
-    content: bytes | bytearray,
-    offset: int,
-    limit: int,
-    remaining_elements: int = 64,
-    doc_type: bytes | None = None,
-) -> bytes | None:
-    if offset == limit:
-        return doc_type
-    if remaining_elements == 0:
-        return None
-    element: Final = _ebml_element_bounds(content, offset, limit)
-    if element is None:
-        return None
-    element_id, data_offset, data_end = element
-    if element_id == 0x4282 and doc_type is not None:
-        return None
-    next_doc_type: Final = bytes(content[data_offset:data_end]) if element_id == 0x4282 else doc_type
-    return _ebml_header_doctype(content, data_end, limit, remaining_elements - 1, next_doc_type)
+def _ebml_header_doctype(content: bytes | bytearray, offset: int, limit: int) -> bytes | None:
+    cursor = offset  # rebind-ok: Advance through at most 64 header elements without recursion.
+    doc_type: bytes | None = None  # rebind-ok: Record the DocType when its element is encountered.
+    for _ in range(64):
+        if cursor == limit:
+            return doc_type
+        element = _ebml_element_bounds(content, cursor, limit)
+        if element is None:
+            return None
+        element_id, data_offset, data_end = element
+        if element_id == 0x4282:
+            if doc_type is not None:
+                return None
+            doc_type = bytes(content[data_offset:data_end])
+        cursor = data_end
+    return doc_type if cursor == limit else None
 
 
 def _video_content_media_type(content: object) -> tuple[str, str]:
