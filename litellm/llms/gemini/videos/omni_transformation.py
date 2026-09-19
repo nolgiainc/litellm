@@ -1,13 +1,18 @@
 import base64
+import json
+import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict
 
 import httpx
 from httpx._types import RequestFiles
+from typing_extensions import NotRequired, ReadOnly
 
 import litellm
 from litellm.constants import DEFAULT_GOOGLE_VIDEO_DURATION_SECONDS
 from litellm.litellm_core_utils.prompt_templates.common_utils import extract_file_data
+from litellm.litellm_core_utils.url_utils import safe_get
 from litellm.llms.base_llm.videos.transformation import BaseVideoConfig
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.interactions import InteractionsAPIResponse
@@ -73,8 +78,237 @@ _CAPABILITY_PARAMS = frozenset(
         "input_reference",
         "image_url",
         "negative_prompt",
+        "video_urls",
     )
 )
+
+# Omni EDIT mode (https://ai.google.dev/gemini-api/docs/omni, "Edit your own
+# videos"): the customer's clip is the source the interaction rewrites, and the
+# prompt names only the change ("Add fog. Keep everything else the same."). The
+# source rides the fal-shaped `video_urls` slot so nolgia-api's reference-video
+# plumbing (video_asset_ids -> signed URL) reaches this provider unchanged; Omni
+# edits exactly ONE source clip, so a second entry is refused rather than dropped.
+_MAX_SOURCE_VIDEOS: Final = 1
+
+# Google recommends the Files API once the whole request approaches 20MB and
+# inline base64 below that. Inline is one round trip and keeps the interaction
+# self contained, so it is the default; larger sources take the resumable Files
+# upload and ride as a `uri` part. 15MB of raw bytes is ~20MB of base64.
+_INLINE_VIDEO_MAX_BYTES: Final = 15 * 1024 * 1024
+
+# Files API processing is normally a few seconds for a 10s clip; a source that is
+# still PROCESSING past this budget fails the request instead of hanging a worker.
+_FILES_ACTIVE_TIMEOUT_SECONDS: Final = 180.0
+_FILES_POLL_INTERVAL_SECONDS: Final = 2.0
+
+_DEFAULT_VIDEO_MIME_TYPE: Final = "video/mp4"
+
+# Interactions VideoContent.mime_type enum (https://ai.google.dev/api/interactions-api).
+_SUPPORTED_VIDEO_MIME_TYPES: Final = frozenset(
+    (
+        "video/mp4",
+        "video/mpeg",
+        "video/mpg",
+        "video/mov",
+        "video/quicktime",
+        "video/avi",
+        "video/x-flv",
+        "video/webm",
+        "video/wmv",
+        "video/x-ms-wmv",
+        "video/3gpp",
+    )
+)
+
+
+class _VideoPart(TypedDict):
+    type: ReadOnly[Literal["video"]]
+    mime_type: ReadOnly[str]
+    data: NotRequired[ReadOnly[str]]
+    uri: NotRequired[ReadOnly[str]]
+
+
+class _TextPart(TypedDict):
+    type: ReadOnly[Literal["text"]]
+    text: ReadOnly[str]
+
+
+class _EditVideoConfig(TypedDict):
+    task: ReadOnly[Literal["edit"]]
+
+
+class _EditGenerationConfig(TypedDict):
+    video_config: ReadOnly[_EditVideoConfig]
+
+
+class _UploadFileMetadata(TypedDict):
+    display_name: ReadOnly[str]
+
+
+class _UploadStartBody(TypedDict):
+    file: ReadOnly[_UploadFileMetadata]
+
+
+def _video_mime_type_from_response(response: httpx.Response) -> str:
+    content_type: Final = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if content_type == "video/quicktime":
+        # The Interactions enum spells QuickTime as video/mov.
+        return "video/mov"
+    if content_type in _SUPPORTED_VIDEO_MIME_TYPES:
+        return content_type
+    return _DEFAULT_VIDEO_MIME_TYPE
+
+
+def _interactions_root(api_base: str) -> str:
+    """Strip the /v1beta/interactions suffix get_complete_url appends, leaving the host root."""
+    return api_base.rstrip("/").removesuffix("/v1beta/interactions")
+
+
+def _response_or_raise(response: httpx.Response | None, step: str) -> httpx.Response:
+    if response is None:
+        raise ValueError(f"Gemini Files API returned no response on the Omni source video {step}")
+    response.raise_for_status()
+    return response
+
+
+def _json_object(response: httpx.Response) -> Mapping[str, object]:
+    payload: Final[object] = response.json()  # pyright: ignore[reportAny]  # httpx json() is untyped
+    if not isinstance(payload, dict):
+        return MappingProxyType({})
+    return MappingProxyType(
+        {str(key): value for key, value in payload.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]  # httpx json() is untyped
+    )
+
+
+def _string_field(obj: Mapping[str, object], key: str) -> str | None:
+    value: Final = obj.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _file_record(payload: Mapping[str, object]) -> Mapping[str, object]:
+    nested: Final = payload.get("file")
+    if isinstance(nested, dict):
+        return MappingProxyType(
+            {str(key): value for key, value in nested.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]  # httpx json() is untyped
+        )
+    return payload
+
+
+def _upload_source_video_to_files_api(
+    content: bytes,
+    mime_type: str,
+    api_base: str,
+    headers: Mapping[str, str],
+) -> str:
+    """
+    Push a source clip through the Gemini Files API resumable upload and return its
+    file URI once Google reports it ACTIVE.
+
+    Two steps, exactly as litellm/llms/gemini/files/transformation.py issues them:
+    a `start` request that returns the upload URL, then a single
+    `upload, finalize` POST of the bytes; then GET /v1beta/files/{name} until the
+    state leaves PROCESSING. The API key travels on the same x-goog-api-key header
+    validate_environment set for the interaction.
+    """
+    client: Final = litellm.module_level_client
+    root: Final = _interactions_root(api_base)
+    auth: Final = {  # mutable-ok: HTTPHandler requires concrete dict headers
+        "x-goog-api-key": headers.get("x-goog-api-key", "")
+    }
+    start_headers: Final = {  # mutable-ok: HTTPHandler requires concrete dict headers
+        **auth,
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": str(len(content)),
+        "X-Goog-Upload-Header-Content-Type": mime_type,
+        "Content-Type": "application/json",
+    }
+    start_body: Final[_UploadStartBody] = {"file": {"display_name": f"omni-edit-source-{int(time.time())}"}}
+    start: Final = _response_or_raise(
+        client.post(  # pyright: ignore[reportUnknownMemberType]  # module_level_client is untyped at this boundary
+            f"{root}/upload/v1beta/files",
+            headers=start_headers,
+            data=json.dumps(start_body),
+        ),
+        "upload start",
+    )
+    upload_url: Final[str | None] = start.headers.get("x-goog-upload-url") or start.headers.get("X-Goog-Upload-URL")  # pyright: ignore[reportAny]  # httpx headers are untyped
+    if not upload_url:
+        raise ValueError("Gemini Files API did not return an upload URL for the Omni source video")
+    finalize_headers: Final = {  # mutable-ok: HTTPHandler requires concrete dict headers
+        **auth,
+        "Content-Length": str(len(content)),
+        "X-Goog-Upload-Offset": "0",
+        "X-Goog-Upload-Command": "upload, finalize",
+    }
+    finalize: Final = _response_or_raise(
+        client.post(  # pyright: ignore[reportUnknownMemberType, reportAny]  # module_level_client is untyped at this boundary
+            upload_url,
+            headers=finalize_headers,
+            data=content,
+        ),
+        "upload finalize",
+    )
+    file_info: Final = _file_record(_json_object(finalize))
+    name: Final = _string_field(file_info, "name")
+    uri: Final = _string_field(file_info, "uri")
+    if name is None or uri is None:
+        raise ValueError("Gemini Files API upload of the Omni source video returned no file name or uri")
+    state = _string_field(file_info, "state")  # rebind-ok: Files API polling advances the state until terminal
+    deadline: Final = time.monotonic() + _FILES_ACTIVE_TIMEOUT_SECONDS
+    while state == "PROCESSING":
+        if time.monotonic() > deadline:
+            raise ValueError(
+                f"Gemini Files API left the Omni source video {name} PROCESSING for over {int(_FILES_ACTIVE_TIMEOUT_SECONDS)}s"
+            )
+        time.sleep(_FILES_POLL_INTERVAL_SECONDS)
+        poll = _response_or_raise(client.get(f"{root}/v1beta/{name}", headers=auth), "state poll")  # pyright: ignore[reportUnknownMemberType]  # module_level_client is untyped at this boundary
+        state = _string_field(_file_record(_json_object(poll)), "state")
+    if state != "ACTIVE":
+        raise ValueError(f"Gemini Files API rejected the Omni source video {name}: state {state!r}")
+    return uri
+
+
+def _source_video_part(video_url: str, api_base: str, headers: Mapping[str, str]) -> _VideoPart:
+    """
+    Encode the customer's source clip as the Omni video input part for EDIT mode.
+
+    The URL is caller controlled (a signed asset URL), so it is fetched through the
+    SSRF checked helper exactly like the start frame. Small clips are inlined as
+    base64 (Google's documented shape: type video, mime_type, data); clips above the
+    inline budget go through the Files API and ride as a uri part instead.
+    """
+    response: Final = safe_get(litellm.module_level_client, video_url)
+    response.raise_for_status()
+    mime_type: Final = _video_mime_type_from_response(response)
+    content: Final = response.content
+    if not content:
+        raise ValueError("Omni edit source video downloaded as zero bytes")
+    if len(content) <= _INLINE_VIDEO_MAX_BYTES:
+        inline_part: Final[_VideoPart] = {
+            "type": "video",
+            "mime_type": mime_type,
+            "data": base64.b64encode(content).decode("utf-8"),
+        }
+        return inline_part
+    uri: Final = _upload_source_video_to_files_api(content, mime_type, api_base, headers)
+    uploaded_part: Final[_VideoPart] = {"type": "video", "mime_type": mime_type, "uri": uri}
+    return uploaded_part
+
+
+def _source_video_urls(value: object) -> tuple[str, ...]:
+    """video_urls arrives as a list of URL strings (fal shape); a lone string is tolerated."""
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,) if value else ()
+    if isinstance(value, (list, tuple)):
+        items: Final[tuple[object, ...]] = tuple(value)  # pyright: ignore[reportUnknownArgumentType]  # OpenAI-shaped video params are untyped at this boundary
+        urls: Final = tuple(item for item in items if isinstance(item, str) and item)
+        if len(urls) != len(items):
+            raise ValueError("video_urls must be a list of https URL strings")
+        return urls
+    raise ValueError("video_urls must be a list of https URL strings")
 
 
 def _start_frame_part(start_frame: FileTypes) -> dict[str, str]:
@@ -123,9 +357,12 @@ class GeminiOmniVideoConfig(BaseVideoConfig):
         and switches the interaction to image_to_video. It also executes
         negative_prompt, though not as a field; Omni has no negative channel, so the
         same method folds it into the prompt as an explicit exclusion, which is a
-        real constraint on the render rather than a discarded param. It has no
-        end-frame, reference-media, regeneration or bitrate surface, and its audio is
-        native with no generate_audio switch.
+        real constraint on the render rather than a discarded param. It executes ONE
+        reference video as the EDIT source (video_urls[0]): the interaction rewrites
+        that clip under the prompt's instruction with task=edit, which is the lane
+        that adds VFX to, or re-angles, footage the customer shot. It has no
+        end-frame, image-element, audio-reference, regeneration or bitrate surface,
+        and its audio is native with no generate_audio switch.
         """
         from litellm.videos.capabilities import DeclaredCapabilityParams
 
@@ -210,16 +447,33 @@ class GeminiOmniVideoConfig(BaseVideoConfig):
         negative_prompt = params.get("negative_prompt")
         aspect_ratio = params.get("aspect_ratio")
         start_frame = params.get("image_url") or params.get("input_reference")
+        source_videos: Final = _source_video_urls(params.get("video_urls"))
+
+        if source_videos and start_frame:
+            # An explicit edit task disables multimodal reference inputs (Google's
+            # cookbook), and a start frame has no meaning when the source clip
+            # supplies every frame; refusing beats silently dropping either.
+            raise ValueError(
+                "Gemini Omni edit mode takes the source clip only: send video_urls without image_url / input_reference"
+            )
+        if len(source_videos) > _MAX_SOURCE_VIDEOS:
+            raise ValueError(
+                f"Gemini Omni edits exactly one source video per request; got {len(source_videos)} video_urls"
+            )
 
         prompt_parts: list[str] = [prompt]
-        if seconds:
+        # Edit output follows the source clip, so a duration clause would fight the
+        # source; it is folded in for generation only.
+        if seconds and not source_videos:
             prompt_parts.append(f"The video must be exactly {seconds} seconds long.")
         if negative_prompt:
             prompt_parts.append(f"Do not include: {negative_prompt}.")
         full_prompt = " ".join(prompt_parts)
 
         response_format: dict[str, Any] = {"type": "video"}
-        if aspect_ratio in _SUPPORTED_ASPECT_RATIOS:
+        # The edit inherits the source clip's framing; an aspect ratio only applies
+        # to generation.
+        if aspect_ratio in _SUPPORTED_ASPECT_RATIOS and not source_videos:
             response_format["aspect_ratio"] = aspect_ratio
 
         request_data: dict[str, Any] = {
@@ -230,7 +484,17 @@ class GeminiOmniVideoConfig(BaseVideoConfig):
             "store": True,
         }
 
-        if start_frame:
+        if source_videos:
+            text_part: Final[_TextPart] = {"type": "text", "text": full_prompt}
+            edit_input: Final = [  # mutable-ok: Interactions requires a JSON array of ordered input parts
+                _source_video_part(source_videos[0], api_base, headers),
+                text_part,
+            ]
+            edit_video_config: Final[_EditVideoConfig] = {"task": "edit"}
+            edit_generation_config: Final[_EditGenerationConfig] = {"video_config": edit_video_config}
+            request_data["input"] = edit_input
+            request_data["generation_config"] = edit_generation_config
+        elif start_frame:
             request_data["input"] = [
                 _start_frame_part(start_frame),
                 {"type": "text", "text": full_prompt},
