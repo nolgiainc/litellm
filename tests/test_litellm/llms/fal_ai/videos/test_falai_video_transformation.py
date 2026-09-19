@@ -250,12 +250,12 @@ class TestFalAIVideoTransformation:
             headers={},
             variant="thumbnail",
         )
-        with pytest.raises(litellm.BadRequestError, match="fal.ai result has no thumbnail"):
+        with pytest.raises(litellm.BadRequestError, match=r"fal\.ai result has no thumbnail"):
             self.config.transform_video_content_response(
                 raw_response=_fal_result_response({"model_mesh": {"url": "https://cdn.example.com/model.glb"}}),
                 logging_obj=self.mock_logging_obj,
             )
-        with pytest.raises(ValueError, match="None.*video.*thumbnail"):
+        with pytest.raises(ValueError, match=r"None.*video.*thumbnail"):
             self.config.transform_video_content_request(
                 video_id=encoded_id,
                 api_base=FAL_API_BASE,
