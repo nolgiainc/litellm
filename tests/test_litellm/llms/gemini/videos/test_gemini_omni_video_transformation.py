@@ -405,7 +405,11 @@ class TestGeminiOmniEditMode:
         # The edit follows the source clip: no duration clause, no aspect ratio.
         assert "seconds long" not in request_data["input"][1]["text"]
         assert request_data["response_format"] == {"type": "video"}
-        client.get.assert_called_once_with("https://storage.example/source.mp4", follow_redirects=True)
+        client.get.assert_called_once_with(
+            "https://storage.example/source.mp4",
+            headers={"Range": f"bytes=0-{14 * 1024 * 1024}"},
+            follow_redirects=True,
+        )
 
     def test_edit_request_maps_quicktime_onto_the_interactions_enum(self, monkeypatch):
         import litellm
@@ -460,84 +464,85 @@ class TestGeminiOmniEditMode:
                 headers={},
             )
 
-    def test_edit_request_uploads_a_large_source_clip_through_the_files_api(self, monkeypatch):
-        import litellm
-        from litellm.llms.gemini.videos import omni_transformation
-
-        monkeypatch.setattr(omni_transformation, "_INLINE_VIDEO_MAX_BYTES", 4)
-        client = self._client_serving(b"mp4-bytes-larger-than-budget")
-        start = Mock()
-        start.raise_for_status = Mock()
-        start.headers = {
-            "x-goog-upload-url": "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=u1"
-        }
-        finalize = Mock()
-        finalize.raise_for_status = Mock()
-        finalize.json.return_value = {
-            "file": {
-                "name": "files/abc",
-                "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc",
-                "state": "PROCESSING",
-                "mimeType": "video/mp4",
-            }
-        }
-        poll = Mock()
-        poll.raise_for_status = Mock()
-        poll.json.return_value = {"name": "files/abc", "state": "ACTIVE"}
-        client.post.side_effect = [start, finalize]
-        # The first GET downloads the source, the second polls the file state.
-        client.get.side_effect = [client.get.return_value, poll]
-        monkeypatch.setattr(litellm, "module_level_client", client)
-        monkeypatch.setattr(litellm, "user_url_validation", False)
-        monkeypatch.setattr(omni_transformation.time, "sleep", lambda _s: None)
-
-        request_data, _, _ = self.config.transform_video_create_request(
+    def _edit_request(self, video_url: str = "https://storage.example/source.mp4"):
+        return self.config.transform_video_create_request(
             model=MODEL,
             prompt="Add fog.",
             api_base=f"{API_BASE}/v1beta/interactions",
-            video_create_optional_request_params={"video_urls": ["https://storage.example/source.mp4"]},
+            video_create_optional_request_params={"video_urls": [video_url]},
             litellm_params=GenericLiteLLMParams(),
             headers={"x-goog-api-key": "secret"},
         )
-        assert request_data["input"][0] == {
-            "type": "video",
-            "mime_type": "video/mp4",
-            "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc",
-        }
-        start_call, finalize_call = client.post.call_args_list
-        assert start_call.args[0] == f"{API_BASE}/upload/v1beta/files"
-        assert start_call.kwargs["headers"]["X-Goog-Upload-Command"] == "start"
-        assert start_call.kwargs["headers"]["x-goog-api-key"] == "secret"
-        assert finalize_call.args[0].startswith(f"{API_BASE}/upload/v1beta/files?upload_id=")
-        assert finalize_call.kwargs["headers"]["X-Goog-Upload-Command"] == "upload, finalize"
-        assert finalize_call.kwargs["data"] == b"mp4-bytes-larger-than-budget"
-        poll_call = client.get.call_args_list[1]
-        assert poll_call.args[0] == f"{API_BASE}/v1beta/files/abc"
 
-    def test_edit_request_fails_when_the_files_api_rejects_the_clip(self, monkeypatch):
+    def test_edit_request_refuses_a_source_over_the_inline_cap(self, monkeypatch):
         import litellm
         from litellm.llms.gemini.videos import omni_transformation
 
-        monkeypatch.setattr(omni_transformation, "_INLINE_VIDEO_MAX_BYTES", 1)
-        client = self._client_serving(b"mp4")
-        start = Mock()
-        start.raise_for_status = Mock()
-        start.headers = {"x-goog-upload-url": "https://g/upload?u=1"}
-        finalize = Mock()
-        finalize.raise_for_status = Mock()
-        finalize.json.return_value = {"file": {"name": "files/x", "uri": "https://g/v1beta/files/x", "state": "FAILED"}}
-        client.post.side_effect = [start, finalize]
-        monkeypatch.setattr(litellm, "module_level_client", client)
+        monkeypatch.setattr(omni_transformation, "_SOURCE_VIDEO_MAX_BYTES", 4)
+        # A server that honors Range answers the capped read with cap + 1 bytes.
+        monkeypatch.setattr(litellm, "module_level_client", self._client_serving(b"12345"))
         monkeypatch.setattr(litellm, "user_url_validation", False)
-        with pytest.raises(ValueError, match="state 'FAILED'"):
-            self.config.transform_video_create_request(
-                model=MODEL,
-                prompt="Add fog.",
-                api_base=f"{API_BASE}/v1beta/interactions",
-                video_create_optional_request_params={"video_urls": ["https://storage.example/source.mp4"]},
-                litellm_params=GenericLiteLLMParams(),
-                headers={"x-goog-api-key": "secret"},
-            )
+        with pytest.raises(ValueError, match="re-encode or trim"):
+            self._edit_request()
+
+    def test_edit_request_accepts_a_source_exactly_at_the_cap(self, monkeypatch):
+        import litellm
+        from litellm.llms.gemini.videos import omni_transformation
+
+        monkeypatch.setattr(omni_transformation, "_SOURCE_VIDEO_MAX_BYTES", 4)
+        monkeypatch.setattr(litellm, "module_level_client", self._client_serving(b"1234"))
+        monkeypatch.setattr(litellm, "user_url_validation", False)
+        request_data, _, _ = self._edit_request()
+        assert request_data["input"][0]["data"] == base64.b64encode(b"1234").decode()
+
+    def test_inline_cap_leaves_headroom_under_googles_20_mb_request_limit(self):
+        from litellm.llms.gemini.videos import omni_transformation
+
+        encoded = 4 * -(-omni_transformation._SOURCE_VIDEO_MAX_BYTES // 3)
+        assert encoded < 20_000_000 - 300_000
+
+    @pytest.mark.parametrize(
+        ("content_type", "url", "body", "expected"),
+        [
+            ("application/octet-stream", "https://storage.example/clip.webm?sig=1", b"body", "video/webm"),
+            ("", "https://storage.example/clip.MOV", b"body", "video/mov"),
+            ("application/octet-stream", "https://storage.example/object", b"\x00\x00\x00\x18ftypisom", "video/mp4"),
+            ("", "https://storage.example/object", b"\x00\x00\x00\x14ftypqt  ", "video/mov"),
+            ("binary/octet-stream", "https://storage.example/object", b"\x1a\x45\xdf\xa3rest", "video/webm"),
+        ],
+    )
+    def test_edit_request_infers_an_unlabelled_source_type(self, monkeypatch, content_type, url, body, expected):
+        import litellm
+
+        monkeypatch.setattr(litellm, "module_level_client", self._client_serving(body, content_type))
+        monkeypatch.setattr(litellm, "user_url_validation", False)
+        request_data, _, _ = self._edit_request(url)
+        assert request_data["input"][0]["mime_type"] == expected
+
+    def test_edit_request_refuses_an_unrecognized_source_type(self, monkeypatch):
+        import litellm
+
+        monkeypatch.setattr(
+            litellm, "module_level_client", self._client_serving(b"not a video", "application/octet-stream")
+        )
+        monkeypatch.setattr(litellm, "user_url_validation", False)
+        with pytest.raises(ValueError, match="unrecognized type"):
+            self._edit_request("https://storage.example/object")
+
+    @pytest.mark.parametrize(
+        ("optional_params", "expected"), [({"seconds": 7}, 7.0), ({"seconds": "4"}, 4.0), ({}, 8.0)]
+    )
+    def test_create_response_reports_the_requested_seconds(self, optional_params, expected):
+        logging_obj = Mock()
+        logging_obj.model_call_details = {"optional_params": optional_params}
+        raw = _response({"id": "v1_edit", "status": "in_progress", "object": "interaction", "model": MODEL})
+        video = self.config.transform_video_create_response(
+            model=MODEL,
+            raw_response=raw,
+            logging_obj=logging_obj,
+            custom_llm_provider="gemini",
+        )
+        assert video.usage["duration_seconds"] == expected
 
     def test_generation_without_a_source_clip_is_unchanged(self):
         request_data, _, _ = self.config.transform_video_create_request(

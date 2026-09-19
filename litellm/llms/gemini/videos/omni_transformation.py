@@ -1,13 +1,11 @@
 import base64
-import json
-import time
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict
 
 import httpx
 from httpx._types import RequestFiles
-from typing_extensions import NotRequired, ReadOnly
+from typing_extensions import ReadOnly
 
 import litellm
 from litellm.constants import DEFAULT_GOOGLE_VIDEO_DURATION_SECONDS
@@ -90,16 +88,15 @@ _CAPABILITY_PARAMS = frozenset(
 # edits exactly ONE source clip, so a second entry is refused rather than dropped.
 _MAX_SOURCE_VIDEOS: Final = 1
 
-# Google recommends the Files API once the whole request approaches 20MB and
-# inline base64 below that. Inline is one round trip and keeps the interaction
-# self contained, so it is the default; larger sources take the resumable Files
-# upload and ride as a `uri` part. 15MB of raw bytes is ~20MB of base64.
-_INLINE_VIDEO_MAX_BYTES: Final = 15 * 1024 * 1024
-
-# Files API processing is normally a few seconds for a 10s clip; a source that is
-# still PROCESSING past this budget fails the request instead of hanging a worker.
-_FILES_ACTIVE_TIMEOUT_SECONDS: Final = 180.0
-_FILES_POLL_INTERVAL_SECONDS: Final = 2.0
+# The source clip always rides INLINE (base64 `data` part). Google caps an inline
+# request at 20 MB, so the raw clip is capped where its base64 form plus the rest
+# of the body still fits: 14 MiB of bytes is 19.57 MB encoded, leaving ~0.4 MB for
+# the prompt and JSON. The Files API route Google suggests above that is NOT
+# used: its upload and ACTIVE polling are synchronous, and this transform also
+# runs on the async handler's event loop, so a large source would stall the
+# proxy worker for the whole upload. A larger source is refused with a message
+# that says why; nolgia-api caps the same size up front.
+_SOURCE_VIDEO_MAX_BYTES: Final = 14 * 1024 * 1024
 
 _DEFAULT_VIDEO_MIME_TYPE: Final = "video/mp4"
 
@@ -120,12 +117,30 @@ _SUPPORTED_VIDEO_MIME_TYPES: Final = frozenset(
     )
 )
 
+# A signed object URL can omit Content-Type or answer application/octet-stream;
+# the path extension and then the container's magic bytes decide instead of
+# silently declaring every unknown body as MP4.
+_VIDEO_MIME_BY_EXTENSION: Final = MappingProxyType(
+    {
+        ".mp4": "video/mp4",
+        ".m4v": "video/mp4",
+        ".mov": "video/mov",
+        ".qt": "video/mov",
+        ".webm": "video/webm",
+        ".mpeg": "video/mpeg",
+        ".mpg": "video/mpg",
+        ".avi": "video/avi",
+        ".flv": "video/x-flv",
+        ".wmv": "video/wmv",
+        ".3gp": "video/3gpp",
+    }
+)
+
 
 class _VideoPart(TypedDict):
     type: ReadOnly[Literal["video"]]
     mime_type: ReadOnly[str]
-    data: NotRequired[ReadOnly[str]]
-    uri: NotRequired[ReadOnly[str]]
+    data: ReadOnly[str]
 
 
 class _TextPart(TypedDict):
@@ -141,159 +156,71 @@ class _EditGenerationConfig(TypedDict):
     video_config: ReadOnly[_EditVideoConfig]
 
 
-class _UploadFileMetadata(TypedDict):
-    display_name: ReadOnly[str]
+def _sniffed_video_mime_type(content: bytes) -> str | None:
+    """Container magic bytes: ISO BMFF (`ftyp` at offset 4, QuickTime brand `qt  `), Matroska/WebM, AVI, FLV."""
+    if content[4:8] == b"ftyp":
+        return "video/mov" if content[8:12] == b"qt  " else _DEFAULT_VIDEO_MIME_TYPE
+    if content[:4] == b"\x1a\x45\xdf\xa3":
+        return "video/webm"
+    if content[:4] == b"RIFF" and content[8:12] == b"AVI ":
+        return "video/avi"
+    if content[:3] == b"FLV":
+        return "video/x-flv"
+    return None
 
 
-class _UploadStartBody(TypedDict):
-    file: ReadOnly[_UploadFileMetadata]
-
-
-def _video_mime_type_from_response(response: httpx.Response) -> str:
+def _video_mime_type(response: httpx.Response, video_url: str, content: bytes) -> str:
     content_type: Final = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
     if content_type == "video/quicktime":
         # The Interactions enum spells QuickTime as video/mov.
         return "video/mov"
     if content_type in _SUPPORTED_VIDEO_MIME_TYPES:
         return content_type
-    return _DEFAULT_VIDEO_MIME_TYPE
-
-
-def _interactions_root(api_base: str) -> str:
-    """Strip the /v1beta/interactions suffix get_complete_url appends, leaving the host root."""
-    return api_base.rstrip("/").removesuffix("/v1beta/interactions")
-
-
-def _response_or_raise(response: httpx.Response | None, step: str) -> httpx.Response:
-    if response is None:
-        raise ValueError(f"Gemini Files API returned no response on the Omni source video {step}")
-    response.raise_for_status()
-    return response
-
-
-def _json_object(response: httpx.Response) -> Mapping[str, object]:
-    payload: Final[object] = response.json()  # pyright: ignore[reportAny]  # httpx json() is untyped
-    if not isinstance(payload, dict):
-        return MappingProxyType({})
-    return MappingProxyType(
-        {str(key): value for key, value in payload.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]  # httpx json() is untyped
+    path: Final = httpx.URL(video_url).path.lower()
+    extension: Final = path[path.rfind(".") :] if "." in path.rsplit("/", 1)[-1] else ""
+    by_extension: Final = _VIDEO_MIME_BY_EXTENSION.get(extension)
+    if by_extension is not None:
+        return by_extension
+    sniffed: Final = _sniffed_video_mime_type(content)
+    if sniffed is not None:
+        return sniffed
+    raise ValueError(
+        f"Omni edit source video has an unrecognized type (Content-Type {content_type or 'missing'!r}, no known "
+        "extension or container signature); send an MP4, MOV, WebM, MPEG, AVI, FLV, WMV or 3GP clip"
     )
 
 
-def _string_field(obj: Mapping[str, object], key: str) -> str | None:
-    value: Final = obj.get(key)
-    return value if isinstance(value, str) and value else None
-
-
-def _file_record(payload: Mapping[str, object]) -> Mapping[str, object]:
-    nested: Final = payload.get("file")
-    if isinstance(nested, dict):
-        return MappingProxyType(
-            {str(key): value for key, value in nested.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]  # httpx json() is untyped
-        )
-    return payload
-
-
-def _upload_source_video_to_files_api(
-    content: bytes,
-    mime_type: str,
-    api_base: str,
-    headers: Mapping[str, str],
-) -> str:
-    """
-    Push a source clip through the Gemini Files API resumable upload and return its
-    file URI once Google reports it ACTIVE.
-
-    Two steps, exactly as litellm/llms/gemini/files/transformation.py issues them:
-    a `start` request that returns the upload URL, then a single
-    `upload, finalize` POST of the bytes; then GET /v1beta/files/{name} until the
-    state leaves PROCESSING. The API key travels on the same x-goog-api-key header
-    validate_environment set for the interaction.
-    """
-    client: Final = litellm.module_level_client
-    root: Final = _interactions_root(api_base)
-    auth: Final = {  # mutable-ok: HTTPHandler requires concrete dict headers
-        "x-goog-api-key": headers.get("x-goog-api-key", "")
-    }
-    start_headers: Final = {  # mutable-ok: HTTPHandler requires concrete dict headers
-        **auth,
-        "X-Goog-Upload-Protocol": "resumable",
-        "X-Goog-Upload-Command": "start",
-        "X-Goog-Upload-Header-Content-Length": str(len(content)),
-        "X-Goog-Upload-Header-Content-Type": mime_type,
-        "Content-Type": "application/json",
-    }
-    start_body: Final[_UploadStartBody] = {"file": {"display_name": f"omni-edit-source-{int(time.time())}"}}
-    start: Final = _response_or_raise(
-        client.post(  # pyright: ignore[reportUnknownMemberType]  # module_level_client is untyped at this boundary
-            f"{root}/upload/v1beta/files",
-            headers=start_headers,
-            data=json.dumps(start_body),
-        ),
-        "upload start",
-    )
-    upload_url: Final[str | None] = start.headers.get("x-goog-upload-url") or start.headers.get("X-Goog-Upload-URL")  # pyright: ignore[reportAny]  # httpx headers are untyped
-    if not upload_url:
-        raise ValueError("Gemini Files API did not return an upload URL for the Omni source video")
-    finalize_headers: Final = {  # mutable-ok: HTTPHandler requires concrete dict headers
-        **auth,
-        "Content-Length": str(len(content)),
-        "X-Goog-Upload-Offset": "0",
-        "X-Goog-Upload-Command": "upload, finalize",
-    }
-    finalize: Final = _response_or_raise(
-        client.post(  # pyright: ignore[reportUnknownMemberType, reportAny]  # module_level_client is untyped at this boundary
-            upload_url,
-            headers=finalize_headers,
-            data=content,
-        ),
-        "upload finalize",
-    )
-    file_info: Final = _file_record(_json_object(finalize))
-    name: Final = _string_field(file_info, "name")
-    uri: Final = _string_field(file_info, "uri")
-    if name is None or uri is None:
-        raise ValueError("Gemini Files API upload of the Omni source video returned no file name or uri")
-    state = _string_field(file_info, "state")  # rebind-ok: Files API polling advances the state until terminal
-    deadline: Final = time.monotonic() + _FILES_ACTIVE_TIMEOUT_SECONDS
-    while state == "PROCESSING":
-        if time.monotonic() > deadline:
-            raise ValueError(
-                f"Gemini Files API left the Omni source video {name} PROCESSING for over {int(_FILES_ACTIVE_TIMEOUT_SECONDS)}s"
-            )
-        time.sleep(_FILES_POLL_INTERVAL_SECONDS)
-        poll = _response_or_raise(client.get(f"{root}/v1beta/{name}", headers=auth), "state poll")  # pyright: ignore[reportUnknownMemberType]  # module_level_client is untyped at this boundary
-        state = _string_field(_file_record(_json_object(poll)), "state")
-    if state != "ACTIVE":
-        raise ValueError(f"Gemini Files API rejected the Omni source video {name}: state {state!r}")
-    return uri
-
-
-def _source_video_part(video_url: str, api_base: str, headers: Mapping[str, str]) -> _VideoPart:
+def _source_video_part(video_url: str) -> _VideoPart:
     """
     Encode the customer's source clip as the Omni video input part for EDIT mode.
 
     The URL is caller controlled (a signed asset URL), so it is fetched through the
-    SSRF checked helper exactly like the start frame. Small clips are inlined as
-    base64 (Google's documented shape: type video, mime_type, data); clips above the
-    inline budget go through the Files API and ride as a uri part instead.
+    SSRF checked helper exactly like the start frame, with a Range header asking
+    for at most one byte past the cap: a server that honors Range (GCS signed URLs
+    and every mainstream CDN do) never sends more than that, so an oversized
+    source costs a bounded read instead of worker memory. A body over the cap,
+    whether a 206 at the boundary or a server that ignored Range, is refused.
     """
-    response: Final = safe_get(litellm.module_level_client, video_url)
+    response: Final = safe_get(
+        litellm.module_level_client,
+        video_url,
+        headers={"Range": f"bytes=0-{_SOURCE_VIDEO_MAX_BYTES}"},  # mutable-ok: httpx takes a concrete headers dict
+    )
     response.raise_for_status()
-    mime_type: Final = _video_mime_type_from_response(response)
     content: Final = response.content
     if not content:
         raise ValueError("Omni edit source video downloaded as zero bytes")
-    if len(content) <= _INLINE_VIDEO_MAX_BYTES:
-        inline_part: Final[_VideoPart] = {
-            "type": "video",
-            "mime_type": mime_type,
-            "data": base64.b64encode(content).decode("utf-8"),
-        }
-        return inline_part
-    uri: Final = _upload_source_video_to_files_api(content, mime_type, api_base, headers)
-    uploaded_part: Final[_VideoPart] = {"type": "video", "mime_type": mime_type, "uri": uri}
-    return uploaded_part
+    if len(content) > _SOURCE_VIDEO_MAX_BYTES:
+        raise ValueError(
+            f"Omni edit source video is larger than {_SOURCE_VIDEO_MAX_BYTES // (1024 * 1024)} MB, the inline limit "
+            "(Google caps an inline request at 20 MB); re-encode or trim the clip"
+        )
+    part: Final[_VideoPart] = {
+        "type": "video",
+        "mime_type": _video_mime_type(response, video_url, content),
+        "data": base64.b64encode(content).decode("utf-8"),
+    }
+    return part
 
 
 def _source_video_urls(value: object) -> tuple[str, ...]:
@@ -309,6 +236,26 @@ def _source_video_urls(value: object) -> tuple[str, ...]:
             raise ValueError("video_urls must be a list of https URL strings")
         return urls
     raise ValueError("video_urls must be a list of https URL strings")
+
+
+def _requested_seconds(logging_obj: "LiteLLMLoggingObj") -> float:
+    """
+    The billed length for the cost log: the request's `seconds` when the caller sent
+    one, else Google's 8 s default. Omni takes no duration field (generation gets it
+    as a prompt clause, an edit follows its source), so the Interactions response
+    never states it; the caller's own value is the only exact basis. nolgia-api
+    sends an edit's source length, rounded up, as `seconds` for exactly this.
+    """
+    optional_params: Final[object] = logging_obj.model_call_details.get("optional_params")
+    seconds: Final[object] = optional_params.get("seconds") if isinstance(optional_params, dict) else None
+    if isinstance(seconds, (int, float, str)):
+        try:
+            parsed: Final = float(seconds)
+        except ValueError:
+            return float(DEFAULT_GOOGLE_VIDEO_DURATION_SECONDS)
+        if parsed > 0:
+            return parsed
+    return float(DEFAULT_GOOGLE_VIDEO_DURATION_SECONDS)
 
 
 def _start_frame_part(start_frame: FileTypes) -> dict[str, str]:
@@ -487,7 +434,7 @@ class GeminiOmniVideoConfig(BaseVideoConfig):
         if source_videos:
             text_part: Final[_TextPart] = {"type": "text", "text": full_prompt}
             edit_input: Final = [  # mutable-ok: Interactions requires a JSON array of ordered input parts
-                _source_video_part(source_videos[0], api_base, headers),
+                _source_video_part(source_videos[0]),
                 text_part,
             ]
             edit_video_config: Final[_EditVideoConfig] = {"task": "edit"}
@@ -533,7 +480,7 @@ class GeminiOmniVideoConfig(BaseVideoConfig):
             model=model,
         )
         video_obj.usage = {
-            "duration_seconds": float(DEFAULT_GOOGLE_VIDEO_DURATION_SECONDS),
+            "duration_seconds": _requested_seconds(logging_obj),
             "video_resolution": "720p",
         }
         return video_obj
