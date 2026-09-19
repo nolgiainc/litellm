@@ -1,3 +1,4 @@
+from typing import Final
 from unittest.mock import MagicMock
 
 import httpx
@@ -96,6 +97,71 @@ class TestFalAIAudioBasics:
         assert body["language_code"] == "en"
         assert "response_format" not in body
         assert "extra_body" not in body
+
+    @pytest.mark.parametrize(
+        ("model", "speed", "nested"),
+        [
+            ("fal_ai/fal-ai/kokoro/american-english", 1.2, False),
+            ("fal-ai/kokoro/american-english", 1, False),
+            ("fal_ai/fal-ai/minimax/speech-2.8-hd", 0.9, True),
+            ("fal-ai/minimax/speech-2.8-turbo", "1.25", True),
+        ],
+    )
+    def test_transform_request_forwards_speed(self, model: str, speed: float | str, nested: bool) -> None:
+        request: Final = self.config.transform_text_to_speech_request(
+            model=model, input="hello", voice=None, optional_params={"speed": speed}, litellm_params={}, headers={}
+        )
+        body: Final = request["dict_body"]
+        if nested:
+            assert body["voice_setting"] == {"speed": float(speed)}
+            assert isinstance(body["voice_setting"]["speed"], float)
+            assert "speed" not in body
+        else:
+            assert body["speed"] == float(speed)
+            assert isinstance(body["speed"], float)
+            assert "voice_setting" not in body
+
+    @pytest.mark.parametrize("from_extra_body", [False, True])
+    def test_transform_request_merges_minimax_speed(self, from_extra_body: bool) -> None:
+        voice_setting: Final = {"voice_id": "Wise_Woman", "speed": 1.0}
+        settings: Final = {"voice_setting": voice_setting}
+        request: Final = self.config.transform_text_to_speech_request(
+            model="fal_ai/fal-ai/minimax/speech-2.8-turbo",
+            input="hello",
+            voice=None,
+            optional_params={"speed": 1.1, **({"extra_body": settings} if from_extra_body else settings)},
+            litellm_params={},
+            headers={},
+        )
+        body: Final = request["dict_body"]
+        assert body["voice_setting"] == {"voice_id": "Wise_Woman", "speed": 1.1}
+        assert "speed" not in body
+        assert voice_setting == {"voice_id": "Wise_Woman", "speed": 1.0}
+
+    @pytest.mark.parametrize(
+        ("model", "speed"),
+        [
+            ("fal_ai/fal-ai/minimax/speech-2.8-hd", "fast"),
+            ("fal_ai/fal-ai/minimax/speech-2.8-hd", None),
+            ("fal_ai/fal-ai/kokoro/american-english", "fast"),
+            ("fal_ai/fal-ai/kokoro/american-english", None),
+            ("fal_ai/fal-ai/orpheus-tts", 1.2),
+            ("fal_ai/fal-ai/dia-tts", 1.2),
+            ("fal_ai/fal-ai/inworld-tts", 1.2),
+            ("fal_ai/fal-ai/minimax-music/v2.6", 1.2),
+            ("fal_ai/fal-ai/elevenlabs/sound-effects/v2", 1.2),
+        ],
+    )
+    def test_transform_request_omits_unsupported_or_missing_speed(self, model: str, speed: float | str | None) -> None:
+        request: Final = self.config.transform_text_to_speech_request(
+            model=model,
+            input="hello",
+            voice=None,
+            optional_params={} if speed is None else {"speed": speed},
+            litellm_params={},
+            headers={},
+        )
+        assert request["dict_body"] == {"text": "hello", "prompt": "hello"}
 
     def test_extract_audio_url_supports_known_shapes(self):
         assert self.config._extract_audio_url({"audio": {"url": "x"}}) == "x"

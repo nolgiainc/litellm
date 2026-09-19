@@ -1,6 +1,6 @@
 import time
 from collections.abc import Coroutine
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, Final, Union
 
 import httpx
 
@@ -115,7 +115,28 @@ class FalAIAudioConfig(BaseTextToSpeechConfig):
         extra_body = optional_params.get("extra_body")
         if isinstance(extra_body, dict):
             body.update(extra_body)
-        return TextToSpeechRequestData(dict_body=body, headers={})
+        request: Final[TextToSpeechRequestData] = {"dict_body": body, "headers": {}}
+        if "speed" not in optional_params:
+            return request
+        model_id: Final = normalize_fal_model_id(model)
+        if not model_id.startswith(("fal-ai/kokoro/", "fal-ai/minimax/speech-")):
+            return request
+        try:
+            speed: Final = float(optional_params["speed"])
+        except (TypeError, ValueError):
+            return request
+        if model_id.startswith("fal-ai/kokoro/"):
+            kokoro_request: Final[TextToSpeechRequestData] = {"dict_body": {**body, "speed": speed}, "headers": {}}
+            return kokoro_request
+        voice_setting: Final = body.get("voice_setting")
+        minimax_request: Final[TextToSpeechRequestData] = {
+            "dict_body": {
+                **body,
+                "voice_setting": {**(voice_setting if isinstance(voice_setting, dict) else {}), "speed": speed},
+            },
+            "headers": {},
+        }
+        return minimax_request
 
     def dispatch_text_to_speech(
         self,
