@@ -66,6 +66,27 @@ def test_jp_anthropic_claude_sonnet_4_6_matches_across_price_maps():
     assert backup[model]["cache_creation_input_token_cost_above_1hr"] == 6.6e-06
 
 
+@pytest.mark.parametrize(
+    "model,rate_720p,rate_1080p",
+    [
+        ("kling/kling-v3-motion-control", 0.126, 0.168),
+        ("kling/kling-v2-6-motion-control", 0.07, 0.112),
+    ],
+)
+def test_kling_motion_control_matches_across_price_maps(model, rate_720p, rate_1080p):
+    with open(REPO_ROOT / "model_prices_and_context_window.json") as f:
+        root = json.load(f)
+    with open(REPO_ROOT / "litellm" / "model_prices_and_context_window_backup.json") as f:
+        backup = json.load(f)
+
+    assert root[model] == backup[model]
+    assert root[model]["output_cost_per_second_720p"] == rate_720p
+    assert root[model]["output_cost_per_second_1080p"] == rate_1080p
+    assert root[model]["output_cost_per_second"] == rate_720p
+    # Kling publishes no 4K motion-control tier, so a 4k rate here would invent a price.
+    assert "output_cost_per_second_4k" not in root[model]
+
+
 def test_grok_imagine_entries_match_across_price_maps():
     """NOL-107: the canonical map shipped none of the four grok-imagine entries
     while the backup carried all of them, the same canonical/backup drift class

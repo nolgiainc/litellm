@@ -182,6 +182,72 @@ class TestKlingVideoCOGS:
         assert (cheap, mid, dear) == pytest.approx((0.63, 0.84, 2.10))
 
 
+class TestKlingMotionControlCOGS:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "resolution,mode,rate",
+        [(None, "std", 0.126), ("720p", "std", 0.126), ("1080p", "pro", 0.168)],
+    )
+    @pytest.mark.parametrize("seconds", [5, 5.5])
+    async def test_router_logs_motion_control_cost(self, resolution, mode, rate, seconds, monkeypatch):
+        import asyncio
+
+        logged = asyncio.Event()
+        model_name = f"motion-control-{resolution}-{seconds}"
+
+        class Capture(_CostCapture):
+            async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
+                await super().async_log_success_event(kwargs, response_obj, start_time, end_time)
+                if model_name in self.costs:
+                    logged.set()
+
+        capture = Capture()
+        monkeypatch.setattr(litellm, "callbacks", [capture])
+        router = litellm.Router(
+            model_list=[
+                {
+                    "model_name": model_name,
+                    "litellm_params": {
+                        "model": "kling/kling-v3-motion-control",
+                        "api_key": "ak:sk",
+                        **({"resolution": resolution} if resolution else {}),
+                    },
+                    "model_info": {"mode": "video_generation"},
+                }
+            ]
+        )
+
+        async def respond(request: httpx.Request, **kwargs) -> httpx.Response:
+            import json
+
+            assert request.method == "POST"
+            assert request.url.path == "/v1/videos/motion-control"
+            payload = json.loads(request.content)
+            assert payload["mode"] == mode
+            assert "seconds" not in payload
+            assert "duration" not in payload
+            return httpx.Response(
+                200,
+                json={"code": 0, "data": {"task_id": "motion-cost", "task_status": "submitted"}},
+                request=request,
+            )
+
+        with patch("httpx.AsyncClient.send", side_effect=respond) as submit:
+            video = await router.avideo_generation(
+                model=model_name,
+                prompt="dance",
+                seconds=str(seconds),
+                image_urls=["https://img/performer.png"],
+                video_urls=["https://video/driver.mp4"],
+            )
+
+        submit.assert_awaited_once()
+        assert video.usage["duration_seconds"] == seconds
+        assert video.usage["video_resolution"] == (resolution or "720p")
+        await asyncio.wait_for(logged.wait(), timeout=5)
+        assert capture.costs[model_name] == pytest.approx(seconds * rate)
+
+
 class TestKlingImageCOGS:
     """The image path had a hardcoded `return 0.0`, unreachable by any config."""
 
