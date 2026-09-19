@@ -83,7 +83,10 @@ _REFERENCE_FIELD_BY_MODEL_MARKER: tuple[tuple[str, _ReferenceField], ...] = (
     ("hyper3d", _ReferenceField(name="input_image_urls", is_list=True)),
     ("kling-video/v3", _ReferenceField(name="start_image_url", is_list=False)),
     ("seedance-2.0/reference-to-video", _ReferenceField(name="image_urls", is_list=True)),
-    ("bria/video/background-removal", _ReferenceField(name="video_url", is_list=False, fallback_content_type="video/mp4")),
+    (
+        "bria/video/background-removal",
+        _ReferenceField(name="video_url", is_list=False, fallback_content_type="video/mp4"),
+    ),
     ("seedvr/upscale/video", _ReferenceField(name="video_url", is_list=False, fallback_content_type="video/mp4")),
 )
 
@@ -518,7 +521,9 @@ class FalAIVideoConfig(BaseVideoConfig):
             try:
                 seconds = float(request_data.get("duration", ""))
             except (TypeError, ValueError) as exc:
-                raise ValueError("Bria background removal requires positive source clip seconds for cost tracking") from exc
+                raise ValueError(
+                    "Bria background removal requires positive source clip seconds for cost tracking"
+                ) from exc
             if not isfinite(seconds) or seconds <= 0:
                 raise ValueError("Bria background removal requires positive source clip seconds for cost tracking")
 
