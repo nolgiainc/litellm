@@ -20934,6 +20934,51 @@
             "/v1/images/generations"
         ]
     },
+    "fal_ai/fal-ai/hunyuan3d-v3/image-to-3d": {
+        "litellm_provider": "fal_ai",
+        "mode": "video_generation",
+        "output_cost_per_video_per_second": 0.375,
+        "source": "https://fal.ai/models/fal-ai/hunyuan3d-v3/image-to-3d",
+        "metadata": {
+            "comment": "fal bills per generation; the rate is stored per second because the fal video provider reports one billed second per mesh generation. The Normal rate excludes +$0.15 PBR, +$0.15 multi-view and +$0.15 custom face_count add-ons, which this map does not meter"
+        },
+        "supported_endpoints": [
+            "/v1/videos"
+        ],
+        "supported_modalities": [
+            "image"
+        ]
+    },
+    "fal_ai/fal-ai/trellis": {
+        "litellm_provider": "fal_ai",
+        "mode": "video_generation",
+        "output_cost_per_video_per_second": 0.02,
+        "source": "https://fal.ai/models/fal-ai/trellis",
+        "metadata": {
+            "comment": "fal bills per generation; the rate is stored per second because the fal video provider reports one billed second per mesh generation"
+        },
+        "supported_endpoints": [
+            "/v1/videos"
+        ],
+        "supported_modalities": [
+            "image"
+        ]
+    },
+    "fal_ai/fal-ai/hyper3d/rodin": {
+        "litellm_provider": "fal_ai",
+        "mode": "video_generation",
+        "output_cost_per_video_per_second": 0.4,
+        "source": "https://fal.ai/models/fal-ai/hyper3d/rodin",
+        "metadata": {
+            "comment": "fal bills per generation; the rate is stored per second because the fal video provider reports one billed second per mesh generation. The HighPack 3x add-on is not metered by this map"
+        },
+        "supported_endpoints": [
+            "/v1/videos"
+        ],
+        "supported_modalities": [
+            "image"
+        ]
+    },
     "fal_ai/fal-ai/seedvr/upscale/video": {
         "litellm_provider": "fal_ai",
         "mode": "video_generation",

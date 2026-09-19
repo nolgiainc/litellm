@@ -1,5 +1,6 @@
 import base64
 import io
+from typing import Final
 from unittest.mock import Mock
 
 import httpx
@@ -22,6 +23,7 @@ from litellm.types.videos.utils import (
     decode_video_id_with_provider,
     encode_video_id_with_provider,
 )
+from litellm.videos.capabilities import DeclaredCapabilityParams
 
 SORA_2_MODEL = "fal_ai/fal-ai/sora-2/text-to-video"
 KLING_MODEL = "fal_ai/fal-ai/kling-video/v2.5-turbo/pro/text-to-video"
@@ -101,6 +103,204 @@ class TestFalAIVideoTransformation:
     def setup_method(self):
         self.config = FalAIVideoConfig()
         self.mock_logging_obj = Mock()
+
+    @pytest.mark.parametrize(
+        "app,reference_field,is_list",
+        (
+            ("hunyuan3d-v3/image-to-3d", "input_image_url", False),
+            ("trellis", "image_url", False),
+            ("hyper3d/rodin", "input_image_urls", True),
+        ),
+    )
+    def test_mesh_promptless_create_and_capabilities(self, app: str, reference_field: str, is_list: bool) -> None:
+        model: Final = f"fal_ai/fal-ai/{app}"
+        reference: Final = "https://example.com/front.png"
+        mapped: Final = self.config.map_openai_params({"input_reference": reference}, model=model, drop_params=False)
+        assert mapped == {reference_field: [reference] if is_list else reference}
+        assert self.config.supports_promptless_video_create(model)
+        assert self.config.get_capability_param_support(model) == DeclaredCapabilityParams(
+            frozenset(("input_reference",))
+        )
+        body, _, url = self.config.transform_video_create_request(
+            model=model,
+            prompt="",
+            api_base=FAL_API_BASE,
+            video_create_optional_request_params=mapped,
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+        assert body == mapped
+        assert "prompt" not in body
+        assert url == f"{FAL_API_BASE}/fal-ai/{app}"
+
+    def test_mesh_extra_views_pass_through_verbatim(self) -> None:
+        mapped: Final = self.config.map_openai_params(
+            {
+                "input_reference": "https://example.com/front.png",
+                "extra_body": {
+                    "back_image_url": "https://example.com/back.png",
+                    "left_image_url": "https://example.com/left.png",
+                    "right_image_url": "https://example.com/right.png",
+                    "enable_pbr": True,
+                    "generate_type": "Normal",
+                    "face_count": 100000,
+                    "polygon_type": "triangle",
+                },
+            },
+            model="fal_ai/fal-ai/hunyuan3d-v3/image-to-3d",
+            drop_params=False,
+        )
+        body, _, _ = self.config.transform_video_create_request(
+            model="fal_ai/fal-ai/hunyuan3d-v3/image-to-3d",
+            prompt="",
+            api_base=FAL_API_BASE,
+            video_create_optional_request_params=mapped,
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+        assert body == {
+            "input_image_url": "https://example.com/front.png",
+            "back_image_url": "https://example.com/back.png",
+            "left_image_url": "https://example.com/left.png",
+            "right_image_url": "https://example.com/right.png",
+            "enable_pbr": True,
+            "generate_type": "Normal",
+            "face_count": 100000,
+            "polygon_type": "triangle",
+        }
+
+    @pytest.mark.parametrize("field,as_list", (("model_glb", False), ("model_glb", True), ("model_mesh", False)))
+    def test_mesh_result_classification(self, field: str, as_list: bool) -> None:
+        media: Final = {"url": "https://cdn.example.com/model.glb"}
+        payload: Final = {field: [media, {"url": "https://cdn.example.com/ignored.glb"}] if as_list else media}
+        assert _classify_result_payload(payload) == _GeneratedVideo("https://cdn.example.com/model.glb")
+        assert _classify_result_payload({**payload, "video": {"url": "https://cdn.example.com/v.mp4"}}) == (
+            _GeneratedVideo("https://cdn.example.com/v.mp4")
+        )
+        assert _classify_result_payload({**payload, "error": "generation failed"}) == _GenerationFailed(
+            "generation failed"
+        )
+        missing: Final = _classify_result_payload({"thumbnail": media})
+        assert isinstance(missing, _GenerationFailed)
+        assert "Video URL not found" in missing.message
+
+    @pytest.mark.parametrize("variant", (None, "video", "thumbnail"))
+    @pytest.mark.parametrize("as_list", (False, True))
+    def test_mesh_content_download(self, variant: str | None, as_list: bool) -> None:
+        glb_url: Final = "https://cdn.example.com/model.glb"
+        thumbnail_url: Final = "https://cdn.example.com/thumbnail.png"
+        expected_url: Final = thumbnail_url if variant == "thumbnail" else glb_url
+        expected_bytes: Final = b"\x89PNG\r\n\x1a\nthumbnail" if variant == "thumbnail" else b"glTFmesh"
+        client: Final = _RecordingClient(
+            httpx.Response(200, content=expected_bytes, request=httpx.Request("GET", expected_url))
+        )
+        config: Final = FalAIVideoConfig(sync_client=client)
+        result_url, _ = config.transform_video_content_request(
+            video_id=encode_video_id_with_provider("mesh-id", "fal_ai", "fal-ai/hunyuan3d-v3/image-to-3d"),
+            api_base=FAL_API_BASE,
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+            variant=variant,
+        )
+        assert result_url == f"{FAL_API_BASE}/fal-ai/hunyuan3d-v3/requests/mesh-id"
+        content: Final = config.transform_video_content_response(
+            raw_response=_fal_result_response(
+                {
+                    "model_glb": [{"url": glb_url}] if as_list else {"url": glb_url},
+                    "thumbnail": [{"url": thumbnail_url}] if as_list else {"url": thumbnail_url},
+                }
+            ),
+            logging_obj=self.mock_logging_obj,
+        )
+        assert content == expected_bytes
+        assert client.calls == [(expected_url, None)]
+
+    @pytest.mark.asyncio
+    async def test_mesh_async_thumbnail_download(self) -> None:
+        url: Final = "https://cdn.example.com/thumbnail.png"
+        client: Final = _RecordingAsyncClient(
+            httpx.Response(200, content=b"thumbnail", request=httpx.Request("GET", url))
+        )
+        config: Final = FalAIVideoConfig(async_client=client)
+        config.transform_video_content_request(
+            video_id=encode_video_id_with_provider("mesh-id", "fal_ai", "fal-ai/hunyuan3d-v3/image-to-3d"),
+            api_base=FAL_API_BASE,
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+            variant="thumbnail",
+        )
+        content: Final = await config.async_transform_video_content_response(
+            raw_response=_fal_result_response(
+                {
+                    "model_glb": {"url": "https://cdn.example.com/model.glb"},
+                    "thumbnail": [{"url": url}],
+                }
+            ),
+            logging_obj=self.mock_logging_obj,
+        )
+        assert content == b"thumbnail"
+        assert client.calls == [(url, None)]
+
+    def test_mesh_thumbnail_missing_and_unknown_variant(self) -> None:
+        encoded_id: Final = encode_video_id_with_provider("mesh-id", "fal_ai", "fal-ai/trellis")
+        self.config.transform_video_content_request(
+            video_id=encoded_id,
+            api_base=FAL_API_BASE,
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+            variant="thumbnail",
+        )
+        with pytest.raises(litellm.BadRequestError, match="fal.ai result has no thumbnail"):
+            self.config.transform_video_content_response(
+                raw_response=_fal_result_response({"model_mesh": {"url": "https://cdn.example.com/model.glb"}}),
+                logging_obj=self.mock_logging_obj,
+            )
+        with pytest.raises(ValueError, match="None.*video.*thumbnail"):
+            self.config.transform_video_content_request(
+                video_id=encoded_id,
+                api_base=FAL_API_BASE,
+                litellm_params=GenericLiteLLMParams(),
+                headers={},
+                variant="unsupported",
+            )
+
+    @pytest.mark.parametrize("app", ("hunyuan3d-v3/image-to-3d", "trellis", "hyper3d/rodin"))
+    def test_mesh_create_usage_is_one_generation(self, app: str) -> None:
+        response: Final = _fal_result_response({"request_id": "mesh-id", "status": "IN_QUEUE"})
+        mesh: Final = self.config.transform_video_create_response(
+            model=f"fal_ai/fal-ai/{app}",
+            raw_response=response,
+            logging_obj=self.mock_logging_obj,
+        )
+        assert mesh.usage["duration_seconds"] == 1.0
+        video: Final = self.config.transform_video_create_response(
+            model=SORA_2_MODEL,
+            raw_response=response,
+            logging_obj=self.mock_logging_obj,
+        )
+        assert video.usage.get("duration_seconds") is None
+        explicit: Final = self.config.transform_video_create_response(
+            model=f"fal_ai/fal-ai/{app}",
+            raw_response=response,
+            logging_obj=self.mock_logging_obj,
+            request_data={"duration": "5"},
+        )
+        assert explicit.usage["duration_seconds"] == 5.0
+
+    @pytest.mark.parametrize(
+        "app,price", (("hunyuan3d-v3/image-to-3d", 0.375), ("trellis", 0.02), ("hyper3d/rodin", 0.40))
+    )
+    def test_mesh_generation_cost(self, monkeypatch: pytest.MonkeyPatch, app: str, price: float) -> None:
+        from litellm.cost_calculator import default_video_cost_calculator
+
+        monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+        monkeypatch.setattr(litellm, "model_cost", litellm.get_model_cost_map(url=""))
+        cost: Final = default_video_cost_calculator(
+            model=f"fal_ai/fal-ai/{app}",
+            duration_seconds=1.0,
+            custom_llm_provider="fal_ai",
+        )
+        assert cost == pytest.approx(price)
 
     def test_get_error_class_raises_content_policy_violation(self) -> None:
         with pytest.raises(litellm.ContentPolicyViolationError) as exc_info:

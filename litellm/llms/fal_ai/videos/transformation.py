@@ -2,7 +2,7 @@ import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, loads
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import httpx
 from httpx._types import RequestFiles
@@ -78,14 +78,15 @@ _SINGLE_IMAGE_URL = _ReferenceField(name="image_url", is_list=False)
 # name produces a reference-free generation with no error, so each entry is
 # verified against that app's published input schema.
 _REFERENCE_FIELD_BY_MODEL_MARKER: tuple[tuple[str, _ReferenceField], ...] = (
+    ("hunyuan3d", _ReferenceField(name="input_image_url", is_list=False)),
+    ("hyper3d", _ReferenceField(name="input_image_urls", is_list=True)),
     ("kling-video/v3", _ReferenceField(name="start_image_url", is_list=False)),
     ("seedance-2.0/reference-to-video", _ReferenceField(name="image_urls", is_list=True)),
     ("seedvr/upscale/video", _ReferenceField(name="video_url", is_list=False, fallback_content_type="video/mp4")),
 )
 
-# fal apps that take only media plus restore controls; a text prompt is neither
-# required nor used, so the create path must not invent one.
-_PROMPTLESS_MODEL_MARKERS: tuple[str, ...] = ("seedvr/upscale/video",)
+_MESH_MODEL_MARKERS: Final = ("hunyuan3d", "trellis", "hyper3d")
+_PROMPTLESS_MODEL_MARKERS: Final = ("seedvr/upscale/video", *_MESH_MODEL_MARKERS)
 
 # Resolution knobs whose value selects the billed output tier for megapixel-priced apps.
 _RESOLUTION_REQUEST_KEYS: tuple[str, ...] = ("target_resolution", "resolution")
@@ -190,14 +191,20 @@ def _coerce_reference_url(value: FileTypes | None, fallback_content_type: str) -
     return f"data:{content_type};base64,{encoded}"
 
 
-def _video_url_from_payload(payload: Mapping[str, object]) -> str | None:
-    video = payload.get("video")
-    if isinstance(video, dict):
-        url = video.get("url")
-        if isinstance(url, str) and url:
+def _file_url_from_payload(payload: object) -> str | None:
+    file: Final = payload[0] if isinstance(payload, list) and payload else payload
+    if not isinstance(file, Mapping):
+        return None
+    url: Final = file.get("url")
+    return url if isinstance(url, str) and url else None
+
+
+def _media_url_from_payload(payload: Mapping[str, object]) -> str | None:
+    for field in ("video", "model_glb", "model_mesh"):
+        if url := _file_url_from_payload(payload.get(field)):
             return url
 
-    top_level = payload.get("url")
+    top_level: Final = payload.get("url")
     return top_level if isinstance(top_level, str) and top_level else None
 
 
@@ -209,7 +216,7 @@ def _classify_result_payload(payload: object) -> _GenerationOutcome:
     if failure is not None:
         return _GenerationFailed(failure)
 
-    url = _video_url_from_payload(payload)
+    url = _media_url_from_payload(payload)
     if url is None:
         return _GenerationFailed(_MISSING_VIDEO_URL_MESSAGE)
     return _GeneratedVideo(url)
@@ -319,6 +326,7 @@ class FalAIVideoConfig(BaseVideoConfig):
         super().__init__()
         self._sync_client = sync_client
         self._async_client = async_client
+        self._content_variant: str | None = None
 
     def set_status_lookup_client(self, client: HTTPHandler | AsyncHTTPHandler) -> None:
         # The result lookup must ride the same client as the status request, or a
@@ -360,6 +368,7 @@ class FalAIVideoConfig(BaseVideoConfig):
         frame plus end frame and nothing else, because the H3 family renders audio
         unconditionally and exposes no generate_audio field; its text-to-video
         sibling stays undeclared since it takes none of the vocabulary at all.
+        Mesh apps are audited on their exact schemas and take only input_reference from the capability vocabulary.
 
         An unrecognized fal app id stays UNDECLARED rather than being reported as
         exhaustively known. fal is a gateway, so a custom or newly added app may
@@ -371,7 +380,7 @@ class FalAIVideoConfig(BaseVideoConfig):
         capability vocabulary, so every other param still flows through untouched.
         """
         normalized = model.lower()
-        if _UPSCALE_MODEL_MARKER in normalized:
+        if _UPSCALE_MODEL_MARKER in normalized or any(marker in normalized for marker in _MESH_MODEL_MARKERS):
             return DeclaredCapabilityParams(_UPSCALE_CAPABILITY_PARAMS)
         if _H3_MAX_I2V_MODEL_MARKER in normalized:
             return DeclaredCapabilityParams(_H3_MAX_I2V_CAPABILITY_PARAMS)
@@ -529,6 +538,8 @@ class FalAIVideoConfig(BaseVideoConfig):
                 usage["duration_seconds"] = float(video_obj.seconds)
             except (ValueError, TypeError):
                 pass
+        elif any(marker in model_id.lower() for marker in _MESH_MODEL_MARKERS):
+            usage["duration_seconds"] = 1.0
         # Megapixel-priced apps (seedvr upscale) bill per output resolution, so the
         # requested tier has to reach cost tracking; a per-second rate alone would
         # charge a 4k restore at the 1080p price.
@@ -732,6 +743,11 @@ class FalAIVideoConfig(BaseVideoConfig):
         headers: dict,
         variant: str | None = None,
     ) -> tuple[str, dict]:
+        if variant not in (None, "video", "thumbnail"):
+            raise ValueError(
+                f"Unsupported fal.ai content variant {variant!r}; supported values: None, video, thumbnail"
+            )
+        self._content_variant = variant
         original_id, model_id = self._extract_request_and_model_id(video_id)
         encoded = encode_url_path_segment(original_id, field_name="video_id")
         namespace = self._queue_request_namespace(model_id)
@@ -763,6 +779,16 @@ class FalAIVideoConfig(BaseVideoConfig):
         outcome = self._classify_result_response(raw_response)
         match outcome:
             case _GeneratedVideo(url):
+                if self._content_variant == "thumbnail":
+                    payload: Final = self._status_payload(raw_response)
+                    thumbnail_url: Final = _file_url_from_payload(payload.get("thumbnail") if payload else None)
+                    if thumbnail_url is None:
+                        raise self.get_error_class(
+                            error_message="fal.ai result has no thumbnail",
+                            status_code=404,
+                            headers=raw_response.headers,
+                        )
+                    return thumbnail_url
                 return url
             case _GenerationFailed(message):
                 raise self.get_error_class(
