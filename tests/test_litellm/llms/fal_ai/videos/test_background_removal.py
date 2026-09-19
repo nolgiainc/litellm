@@ -49,7 +49,7 @@ def test_explicit_alpha_overrides(override):
     ],
 )
 def test_data_uri_rejected(params):
-    with pytest.raises(ValueError, match="hosted.*video_url"):
+    with pytest.raises(ValueError, match=r"hosted.*video_url"):
         request({"seconds": "5", **params})
 
 
