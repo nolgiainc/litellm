@@ -1,5 +1,6 @@
 import base64
 import io
+from typing import Final
 from unittest.mock import Mock
 
 import httpx
@@ -15,6 +16,7 @@ from litellm.types.videos.utils import (
     decode_video_id_with_provider,
     encode_video_id_with_provider,
 )
+from litellm.videos.capabilities import DeclaredCapabilityParams
 
 MODEL = "kling/kling-v3"
 API_BASE = "https://api-singapore.klingai.com/v1"
@@ -725,3 +727,260 @@ class TestKlingErrorMessageSurvivesRewrapping:
         response = kling_error_response(429, "slow down")
         assert response.text == "slow down"
         assert "set-cookie" not in {key.lower() for key in response.headers}
+
+
+class TestKlingMotionControl:
+    @pytest.mark.parametrize("model_name", ("kling-v3", "kling-v2-6"))
+    @pytest.mark.parametrize("resolution,mode", ((None, "std"), ("720p", "std"), ("1080p", "pro")))
+    @pytest.mark.parametrize("orientation", ("video", "image"))
+    @pytest.mark.parametrize("generate_audio", (True, False))
+    def test_motion_control_wire_body(
+        self, model_name: str, resolution: str | None, mode: str, orientation: str, generate_audio: bool
+    ) -> None:
+        config: Final = KlingVideoConfig()
+        model: Final = f"kling/{model_name}-motion-control"
+        mapped: Final = config.map_openai_params(
+            video_create_optional_params={
+                "input_reference": "https://img/performer.png",
+                "seconds": 5,
+                "size": "1920x1080",
+                "generate_audio": generate_audio,
+                "extra_body": {
+                    "video_urls": ["https://video/driver.mp4"],
+                    **({"resolution": resolution} if resolution is not None else {}),
+                    "character_orientation": orientation,
+                    "external_task_id": "external-1",
+                    "callback_url": "https://callback/result",
+                    "sound": "on",
+                    "audio": True,
+                    "keep_original_sound": True,
+                    "duration": "10",
+                    "aspect_ratio": "1:1",
+                    "zzz_unknown_field": "ignored",
+                },
+            },
+            model=model,
+            drop_params=False,
+        )
+        data, files, url = config.transform_video_create_request(
+            model, "dance", API_BASE, mapped, GenericLiteLLMParams(), {}
+        )
+        assert data == {
+            "model_name": model_name,
+            "prompt": "dance",
+            "mode": mode,
+            "image_url": "https://img/performer.png",
+            "video_url": "https://video/driver.mp4",
+            "character_orientation": orientation,
+            "external_task_id": "external-1",
+            "callback_url": "https://callback/result",
+        }
+        assert files == ()
+        assert url == f"{API_BASE}/videos/motion-control"
+
+    @pytest.mark.parametrize("image", ("https://img/performer.png", b"performer", ("frame.png", b"performer")))
+    def test_motion_control_image_alias_and_bare_driver(self, image: str | bytes | tuple[str, bytes]) -> None:
+        mapped: Final = KlingVideoConfig().map_openai_params(
+            {"seconds": 5, "extra_body": {"image_url": image, "video_urls": "https://video/driver.mp4"}},
+            "kling-v3-motion-control",
+            False,
+        )
+        assert mapped == {
+            "image_url": image if isinstance(image, str) else base64.b64encode(b"performer").decode(),
+            "video_url": "https://video/driver.mp4",
+            "mode": "std",
+            "character_orientation": "video",
+            "seconds": "5",
+        }
+
+    @pytest.mark.parametrize("resolution", ("4k", "4K", "master", "8k", ""))
+    def test_motion_control_rejects_unpriced_resolution(self, resolution: str) -> None:
+        with pytest.raises(litellm.BadRequestError, match=r"no 4K motion-control tier.*unpriced tier"):
+            KlingVideoConfig().map_openai_params(
+                {"extra_body": {"resolution": resolution}}, "kling/kling-v3-motion-control", False
+            )
+
+    @pytest.mark.parametrize(
+        "image,drivers,orientation,error",
+        (
+            (None, ("https://video/a",), "video", "performer.*input_reference.*image_url"),
+            ("  ", ("https://video/a",), "video", "performer.*input_reference.*image_url"),
+            ("https://img/a", ("",), "video", "driver.*video_urls"),
+            ("https://img/a", (), "video", "driver.*video_urls"),
+            ("https://img/a", ("https://video/a", "https://video/b"), "video", "2 driver"),
+            ("https://img/a", ("https://video/a",), "bogus", "character_orientation.*image.*video"),
+        ),
+    )
+    def test_motion_control_rejects_invalid_inputs(
+        self, image: str | None, drivers: tuple[str, ...], orientation: str, error: str
+    ) -> None:
+        with pytest.raises(litellm.BadRequestError, match=error):
+            KlingVideoConfig().map_openai_params(
+                {
+                    "seconds": 5,
+                    "extra_body": {"image_url": image, "video_urls": drivers, "character_orientation": orientation},
+                },
+                "kling/kling-v3-motion-control",
+                False,
+            )
+
+    def test_motion_control_capabilities_and_supported_params(self) -> None:
+        config: Final = KlingVideoConfig()
+        support: Final = config.get_capability_param_support("kling/kling-v3-motion-control")
+        assert isinstance(support, DeclaredCapabilityParams)
+        assert support.supported == frozenset(("input_reference", "image_url", "image_urls", "video_urls"))
+        regular: Final = config.get_capability_param_support(MODEL)
+        assert isinstance(regular, DeclaredCapabilityParams)
+        assert "generate_audio" in regular.supported
+        assert "seconds" in config.get_supported_openai_params("kling/kling-v3-motion-control")
+        assert not frozenset(("size", "generate_audio")) & frozenset(
+            config.get_supported_openai_params("kling/kling-v3-motion-control")
+        )
+
+    @pytest.mark.parametrize("mode,resolution", (("std", "720p"), ("pro", "1080p")))
+    @pytest.mark.parametrize("status", ("succeed", "succeeded"))
+    def test_motion_control_response_polling_and_usage(self, mode: str, resolution: str, status: str) -> None:
+        config: Final = KlingVideoConfig()
+        response: Final = httpx.Response(
+            200,
+            json={"code": 0, "data": {"task_id": "motion-1", "task_status": status}},
+            request=httpx.Request("GET", f"{API_BASE}/videos/motion-control/motion-1"),
+        )
+        created: Final = config.transform_video_create_response(
+            "kling/kling-v3-motion-control", response, Mock(optional_params={"seconds": "5"}), "kling", {"mode": mode}
+        )
+        assert created.status == "completed"
+        assert created.usage == {"video_resolution": resolution, "duration_seconds": 5.0}
+        assert decode_video_id_with_provider(created.id)["model_id"] == "motion-control"
+        assert config.transform_video_status_retrieve_request(created.id, API_BASE, GenericLiteLLMParams(), {}) == (
+            f"{API_BASE}/videos/motion-control/motion-1",
+            {},
+        )
+        polled: Final = config.transform_video_status_retrieve_response(response, Mock(), "kling")
+        assert polled.status == "completed"
+        assert polled.id == created.id
+        assert config.transform_video_content_request(polled.id, API_BASE, GenericLiteLLMParams(), {}) == (
+            f"{API_BASE}/videos/motion-control/motion-1",
+            {},
+        )
+        assert (
+            config._extract_video_url(
+                {"data": {"task_status": status, "task_result": {"videos": [{"url": "https://video/result.mp4"}]}}}
+            )
+            == "https://video/result.mp4"
+        )
+
+    @pytest.mark.parametrize("optional_params", ({}, None))
+    def test_motion_control_response_without_billed_seconds_degrades_instead_of_raising(
+        self, optional_params: object
+    ) -> None:
+        config: Final = KlingVideoConfig()
+        response: Final = httpx.Response(
+            200,
+            json={"code": 0, "data": {"task_id": "motion-2", "task_status": "submitted"}},
+            request=httpx.Request("POST", f"{API_BASE}/videos/motion-control"),
+        )
+        created: Final = config.transform_video_create_response(
+            "kling/kling-v3-motion-control",
+            response,
+            Mock(optional_params=optional_params),
+            "kling",
+            {"mode": "std"},
+        )
+        assert created.status == "queued"
+        assert created.usage == {"video_resolution": "720p"}
+        assert decode_video_id_with_provider(created.id)["model_id"] == "motion-control"
+
+    @pytest.mark.parametrize("mode", ("4k", "master"))
+    def test_motion_control_create_rejects_unpriced_mode(self, mode: str) -> None:
+        with pytest.raises(litellm.BadRequestError, match="unpriced tier"):
+            KlingVideoConfig().transform_video_create_request(
+                "kling/kling-v3-motion-control",
+                "dance",
+                API_BASE,
+                {"mode": mode, "image_url": "https://img/a", "video_url": "https://video/a"},
+                GenericLiteLLMParams(),
+                {},
+            )
+
+    @pytest.mark.parametrize("mode,resolution", (("std", "720p"), ("pro", "1080p")))
+    @pytest.mark.parametrize("prompt", ("dance", "", "  "))
+    def test_motion_control_sdk_request(self, mode: str, resolution: str, prompt: str) -> None:
+        from litellm.llms.custom_httpx.http_handler import HTTPHandler
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            import json
+
+            assert request.method == "POST"
+            assert str(request.url) == f"{API_BASE}/videos/motion-control"
+            assert json.loads(request.content) == {
+                "model_name": "kling-v3",
+                **({"prompt": prompt} if prompt.strip() else {}),
+                "image_url": "https://img/performer.png",
+                "video_url": "https://video/driver.mp4",
+                "character_orientation": "video",
+                "mode": mode,
+            }
+            return httpx.Response(200, json={"code": 0, "data": {"task_id": "motion-sdk", "task_status": "submitted"}})
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            result: Final = litellm.video_generation(
+                model="kling/kling-v3-motion-control",
+                prompt=prompt,
+                seconds="5.5",
+                image_urls=["https://img/performer.png"],
+                resolution=resolution,
+                video_urls=["https://video/driver.mp4"],
+                api_key="A" * 32 + ":" + "S" * 32,
+                api_base=API_BASE,
+                client=HTTPHandler(client=client),
+                extra_body={"audio": True, "keep_original_sound": True, "sound": "on", "duration": "9"},
+            )
+        assert isinstance(result, VideoObject)
+        assert result.status == "queued"
+        assert result.usage == {"video_resolution": resolution, "duration_seconds": 5.5}
+        assert decode_video_id_with_provider(result.id)["model_id"] == "motion-control"
+
+    @pytest.mark.parametrize("images", ([" https://img/element "], " https://img/element "))
+    def test_performer_element_precedence(self, images: list[str] | str) -> None:
+        mapped = KlingVideoConfig().map_openai_params(
+            {
+                "seconds": 5,
+                "input_reference": "https://img/fallback",
+                "extra_body": {
+                    "image_urls": images,
+                    "image_url": "https://img/last",
+                    "video_urls": "https://video/driver",
+                },
+            },
+            "kling/kling-v3-motion-control",
+            False,
+        )
+        assert mapped["image_url"] == "https://img/element"
+
+    def test_rejects_multiple_performers(self) -> None:
+        with pytest.raises(litellm.BadRequestError, match="got 2 performers"):
+            KlingVideoConfig().map_openai_params(
+                {
+                    "seconds": 5,
+                    "extra_body": {
+                        "image_urls": ["https://img/a", "https://img/b"],
+                        "video_urls": "https://video/driver",
+                    },
+                },
+                "kling/kling-v3-motion-control",
+                False,
+            )
+
+    @pytest.mark.parametrize("seconds", (None, 0, -1, "", "bogus", "nan", "inf", True))
+    def test_rejects_unpriced_duration(self, seconds: str | int | None) -> None:
+        with pytest.raises(litellm.BadRequestError, match=r"bills per second.*driver clip"):
+            KlingVideoConfig().map_openai_params(
+                {
+                    **({"seconds": seconds} if seconds is not None else {}),
+                    "input_reference": "https://img/a",
+                    "extra_body": {"video_urls": "https://video/driver"},
+                },
+                "kling/kling-v3-motion-control",
+                False,
+            )

@@ -1,14 +1,17 @@
 import base64
+import math
 import re
 from collections.abc import Mapping
 from json import JSONDecodeError
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 from httpx._types import RequestFiles
+from pydantic import BaseModel, ConfigDict, SkipValidation
 
 import litellm
+from litellm._logging import verbose_logger
 from litellm.litellm_core_utils.prompt_templates.common_utils import extract_file_data
 from litellm.litellm_core_utils.url_utils import encode_url_path_segment
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
@@ -44,6 +47,42 @@ else:
 
 _TEXT_TO_VIDEO = "text2video"
 _IMAGE_TO_VIDEO = "image2video"
+_MOTION_CONTROL: Final = "motion-control"
+
+
+class _MotionControlParams(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    input_reference: SkipValidation[FileTypes | None] = None
+    image_url: SkipValidation[FileTypes | None] = None
+    image_urls: str | tuple[SkipValidation[str | FileTypes], ...] | None = None
+    seconds: SkipValidation[str | float | None] = None
+    video_urls: str | tuple[str, ...] | None = None
+    video_url: str | None = None
+    resolution: str | None = None
+    mode: str = "std"
+    character_orientation: str = "video"
+    prompt: str | None = None
+    external_task_id: str | None = None
+    callback_url: str | None = None
+
+
+def _motion_control_model_name(model: str) -> str | None:
+    bare: Final = strip_kling_prefix(model)
+    suffix: Final = "-motion-control"
+    return bare.removesuffix(suffix) if bare.endswith(suffix) else None
+
+
+def _motion_control_billed_seconds(logging_obj: "LiteLLMLoggingObj") -> str | None:
+    optional_params: Final = getattr(logging_obj, "optional_params", None)
+    seconds: Final = optional_params.get("seconds") if isinstance(optional_params, Mapping) else None
+    if seconds is None:
+        verbose_logger.warning(
+            "Kling motion control: no billed duration on the logged params, so this generation records $0 COGS"
+        )
+        return None
+    return str(seconds)
+
 
 _I2V_MODEL_MARKERS = ("image-to-video", "image2video")
 
@@ -175,6 +214,9 @@ class KlingVideoConfig(BaseVideoConfig):
     RESOLUTION_TO_MODE = {"720p": "std", "1080p": "pro", "4k": "4k"}
     DEFAULT_RESOLUTION = "1080p"
 
+    def supports_promptless_video_create(self, model: str) -> bool:
+        return _motion_control_model_name(model) is not None
+
     def get_capability_param_support(self, model: str) -> CapabilityParamSupport:
         """
         Kling's direct API executes a start frame (image) and generate_audio (sound).
@@ -197,9 +239,21 @@ class KlingVideoConfig(BaseVideoConfig):
         end frame; that difference is exactly why advertisement has to follow the
         route a model is actually configured on rather than the vendor's catalog.
         """
+        if _motion_control_model_name(model) is not None:
+            return DeclaredCapabilityParams(frozenset(("input_reference", "image_url", "image_urls", "video_urls")))
         return DeclaredCapabilityParams(_CAPABILITY_PARAMS)
 
-    def get_supported_openai_params(self, model: str) -> list:
+    def get_supported_openai_params(self, model: str) -> list[str]:
+        if _motion_control_model_name(model) is not None:
+            return [  # mutable-ok: BaseVideoConfig requires a list of supported parameter names
+                "model",
+                "prompt",
+                "input_reference",
+                "seconds",
+                "user",
+                "extra_headers",
+                "extra_body",
+            ]
         return [
             "model",
             "prompt",
@@ -252,6 +306,11 @@ class KlingVideoConfig(BaseVideoConfig):
         if isinstance(extra_body, dict):
             params = {**params, **extra_body}
 
+        if _motion_control_model_name(model) is not None:
+            return dict(  # mutable-ok: the video pipeline mutates the mapped optional-parameter dict
+                self._map_motion_control_params(_MotionControlParams.model_validate(params), model)
+            )
+
         mapped: dict[str, Any] = {}
 
         seconds = params.get("seconds")
@@ -301,6 +360,93 @@ class KlingVideoConfig(BaseVideoConfig):
 
         return mapped
 
+    def _map_motion_control_params(self, params: _MotionControlParams, model: str) -> Mapping[str, str]:
+        resolution: Final = params.resolution
+        mode: Final = (
+            self.RESOLUTION_TO_MODE.get(str(resolution).strip().lower()) if resolution is not None else params.mode
+        )
+        # Kling publishes no 4K motion-control tier; forwarding it would record unpriced COGS.
+        if mode not in ("std", "pro"):
+            raise litellm.BadRequestError(
+                message="Use 720p or 1080p: Kling publishes no 4K motion-control tier, which would render at an unpriced tier.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        orientation: Final = params.character_orientation
+        if orientation not in ("image", "video"):
+            raise litellm.BadRequestError(
+                message="Kling character_orientation must be image or video.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        performers: Final = (
+            (params.image_urls,) if isinstance(params.image_urls, str) else tuple(params.image_urls or ())
+        )
+        if len(performers) > 1:
+            raise litellm.BadRequestError(
+                message=f"Kling motion control requires exactly one performer via image_urls; got {len(performers)} performers.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        image: Final = (
+            self._coerce_start_image(performers[0] if performers else None)
+            or self._coerce_start_image(params.input_reference)
+            or self._coerce_start_image(params.image_url)
+        )
+        if not image:
+            raise litellm.BadRequestError(
+                message="Kling motion control requires a performer still via image_urls, input_reference or image_url.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        drivers: Final = params.video_urls
+        clips: Final = (drivers,) if isinstance(drivers, str) else tuple(drivers or ())
+        if len(clips) > 1:
+            raise litellm.BadRequestError(
+                message=f"Kling motion control requires exactly one driver clip via video_urls; got {len(clips)} drivers.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        driver: Final = clips[0] if clips else params.video_url
+        if not driver or not driver.strip():
+            raise litellm.BadRequestError(
+                message="Kling motion control requires a driver clip via video_urls.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        duration_error: Final = litellm.BadRequestError(
+            message=(
+                "Kling motion control bills per second of output; declare the driver clip's duration "
+                "as a positive seconds value so a render cannot be submitted at an unpriced zero duration."
+            ),
+            model=model,
+            llm_provider=litellm.LlmProviders.KLING.value,
+        )
+        try:
+            duration: Final = float(params.seconds) if params.seconds is not None else 0.0
+        except (TypeError, ValueError) as exc:
+            raise duration_error from exc
+        if isinstance(params.seconds, bool) or not math.isfinite(duration) or duration <= 0:
+            raise duration_error
+        # Seconds stays in logging optional_params for COGS, but is removed from the vendor body.
+        # Unknown fields are silently ignored by Kling, including every audio control.
+        return MappingProxyType(
+            {
+                key: value
+                for key, value in (
+                    ("mode", mode),
+                    ("seconds", str(params.seconds)),
+                    ("image_url", image),
+                    ("video_url", driver),
+                    ("character_orientation", orientation),
+                    ("prompt", params.prompt if params.prompt and params.prompt.strip() else None),
+                    ("external_task_id", params.external_task_id),
+                    ("callback_url", params.callback_url),
+                )
+                if value is not None
+            }
+        )
+
     @staticmethod
     def _is_image_to_video_model(model: str) -> bool:
         normalized = model.lower()
@@ -309,7 +455,7 @@ class KlingVideoConfig(BaseVideoConfig):
         return "i2v" in re.split(r"[/\-_.]+", normalized)
 
     @staticmethod
-    def _coerce_start_image(input_reference: FileTypes | None) -> str | None:
+    def _coerce_start_image(input_reference: str | FileTypes | None) -> str | None:
         if input_reference is None:
             return None
         if isinstance(input_reference, str):
@@ -346,6 +492,25 @@ class KlingVideoConfig(BaseVideoConfig):
         litellm_params: GenericLiteLLMParams,
         headers: dict,
     ) -> tuple[dict, RequestFiles, str]:
+        motion_model: Final = _motion_control_model_name(model)
+        if motion_model is not None:
+            return (
+                {  # mutable-ok: the HTTP video handler requires a JSON-serializable dict
+                    **{  # mutable-ok: filtered fields are merged into the JSON body
+                        key: value
+                        for key, value in self._map_motion_control_params(
+                            _MotionControlParams.model_validate(
+                                {**video_create_optional_request_params, "prompt": prompt}  # mutable-ok: Pydantic input
+                            ),
+                            model,
+                        ).items()
+                        if key != "seconds"
+                    },
+                    "model_name": motion_model,
+                },
+                (),
+                f"{api_base}/videos/{_MOTION_CONTROL}",
+            )
         mapped: dict[str, Any] = dict(video_create_optional_request_params)
         mapped.pop("model", None)
         kind = _IMAGE_TO_VIDEO if mapped.get("image") else _TEXT_TO_VIDEO
@@ -379,7 +544,13 @@ class KlingVideoConfig(BaseVideoConfig):
             raise ValueError(f"Kling video submit response is missing data.task_id: {response_data}")
 
         status = KLING_TASK_STATUS_MAP.get(data.get("task_status", "submitted"), "queued")
-        kind = _IMAGE_TO_VIDEO if request_data and request_data.get("image") else _TEXT_TO_VIDEO
+        kind: Final = (
+            _MOTION_CONTROL
+            if _motion_control_model_name(model) is not None
+            else _IMAGE_TO_VIDEO
+            if request_data and request_data.get("image")
+            else _TEXT_TO_VIDEO
+        )
 
         seconds: str | None = None
         size: str | None = None
@@ -388,6 +559,14 @@ class KlingVideoConfig(BaseVideoConfig):
                 seconds = str(request_data["duration"])
             if request_data.get("aspect_ratio") is not None:
                 size = str(request_data["aspect_ratio"]).replace(":", "x")
+
+        if kind == _MOTION_CONTROL:
+            # Motion control sends no duration to Kling (output length follows the driver
+            # clip), so the billed seconds survive only on the logged optional params.
+            # Degrade rather than raise: the task is already submitted and paid for by
+            # the time this runs, so a missing duration must cost COGS accuracy, not the
+            # caller's generation.
+            seconds = _motion_control_billed_seconds(logging_obj)  # rebind-ok: motion duration is metadata only
 
         usage: dict[str, Any] = {}
         if seconds is not None:
@@ -502,9 +681,9 @@ class KlingVideoConfig(BaseVideoConfig):
         decoded = decode_video_id_with_provider(video_id)
         task_id = decoded.get("video_id") or extract_original_video_id(video_id)
         kind = decoded.get("model_id")
-        if kind not in (_TEXT_TO_VIDEO, _IMAGE_TO_VIDEO):
+        if kind not in (_TEXT_TO_VIDEO, _IMAGE_TO_VIDEO, _MOTION_CONTROL):
             raise ValueError(
-                "Kling video status/content lookup requires the text2video/image2video "
+                "Kling video status/content lookup requires the text2video/image2video/motion-control "
                 "kind encoded in the video_id. Use the id returned by video creation."
             )
         return task_id, kind
@@ -515,7 +694,7 @@ class KlingVideoConfig(BaseVideoConfig):
         if request is None:
             return None
         path = request.url.path
-        for kind in (_IMAGE_TO_VIDEO, _TEXT_TO_VIDEO):
+        for kind in (_IMAGE_TO_VIDEO, _TEXT_TO_VIDEO, _MOTION_CONTROL):
             if f"/videos/{kind}/" in path or path.endswith(f"/videos/{kind}"):
                 return kind
         return None

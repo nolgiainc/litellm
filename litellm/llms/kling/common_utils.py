@@ -5,6 +5,7 @@ KLING_TASK_STATUS_MAP = {
     "submitted": "queued",
     "processing": "in_progress",
     "succeed": "completed",
+    "succeeded": "completed",
     "failed": "failed",
 }
 
