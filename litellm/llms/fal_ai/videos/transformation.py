@@ -508,18 +508,20 @@ class FalAIVideoConfig(BaseVideoConfig):
         request_data.pop("model", None)
 
         if _BACKGROUND_REMOVAL_MODEL_MARKER in model_id.lower():
-            unsupported = {"aspect_ratio", "resolution", "target_resolution", "size"} & request_data.keys()
+            unsupported: Final = (
+                frozenset(("aspect_ratio", "resolution", "target_resolution", "size")) & request_data.keys()
+            )
             if unsupported:
                 raise ValueError(f"Bria background removal does not support: {', '.join(sorted(unsupported))}")
             request_data.pop("prompt", None)
             request_data.setdefault("background_color", "Transparent")
             request_data.setdefault("output_container_and_codec", "webm_vp9")
-            video_url = request_data.get("video_url")
+            video_url: Final = request_data.get("video_url")
             if isinstance(video_url, str) and video_url.strip().lower().startswith("data:"):
                 raise ValueError("Bria background removal requires a hosted video_url; data URIs are unsupported")
             # fal bills the source clip, but its queue response supplies no duration.
             try:
-                seconds = float(request_data.get("duration", ""))
+                seconds: Final = float(request_data.get("duration", ""))
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     "Bria background removal requires positive source clip seconds for cost tracking"
