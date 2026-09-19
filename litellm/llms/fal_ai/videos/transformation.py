@@ -525,6 +525,8 @@ class FalAIVideoConfig(BaseVideoConfig):
             # fal bills the source clip, but its queue response supplies no duration,
             # so a submission without one could only ever record $0 (the NOL-519 class).
             # Refuse it here, before the job exists, rather than at costing time.
+            # guard-ok: request_data is untyped JSON, so the duration must be
+            # narrowed before it can be coerced.
             raw_duration: object = request_data.get("duration")
             if not isinstance(raw_duration, (str, int, float)) or isinstance(raw_duration, bool):
                 raise ValueError(_BACKGROUND_REMOVAL_SECONDS_MESSAGE)
