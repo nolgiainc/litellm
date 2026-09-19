@@ -26,31 +26,27 @@ patched with autospec so the real __init__ still stores self.data (captured via 
 mock's call args), and a brand-new kwarg added to this layer surfaces as a failure.
 """
 
-import os
 import re
-import sys
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
 import pytest
+from fastapi import Response
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
-
-import litellm.proxy.proxy_server as proxy_server
-import litellm.proxy.video_endpoints.endpoints as endpoints
+from litellm.proxy import proxy_server
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessing
 from litellm.proxy.utils import ProxyLogging
+from litellm.proxy.video_endpoints import endpoints
 from litellm.router import Router
 from litellm.types.videos.utils import (
     encode_character_id_with_provider,
     encode_video_id_with_provider,
 )
-
-from fastapi import Response
-from starlette.datastructures import UploadFile as StarletteUploadFile
 
 # --------------------------------------------------------------------------- #
 # A real model-encoded video id: decodes (for real) to provider "azure",
@@ -67,7 +63,7 @@ AZURE_VIDEO_ID = encode_video_id_with_provider("video_orig123", "azure", VIDEO_M
 AZURE_CHARACTER_ID = encode_character_id_with_provider(
     "char_orig", "azure", VIDEO_MODEL_ID
 )
-RESOLVED_MODELS: Dict[str, str] = {VIDEO_MODEL_ID: "azure-sora"}
+RESOLVED_MODELS: dict[str, str] = {VIDEO_MODEL_ID: "azure-sora"}
 
 # Sentinel propagated by base_process for the passthrough endpoints.
 SENTINEL = object()
@@ -79,8 +75,8 @@ class FakeRequest:
 
     def __init__(
         self,
-        headers: Optional[Dict[str, str]] = None,
-        query: Optional[Dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
+        query: dict[str, str] | None = None,
         raw_body: bytes = b"{}",
     ):
         self.headers = headers or {}
@@ -103,7 +99,7 @@ class Harness:
     router: MagicMock
     resolve_model: MagicMock
 
-    def processor_data(self) -> Dict[str, Any]:
+    def processor_data(self) -> dict[str, Any]:
         """The exact `data` dict the processor was constructed with."""
         assert self.base_process.call_count == 1
         return dict(self.base_process.call_args.args[0].data)
@@ -207,7 +203,7 @@ def _user() -> UserAPIKeyAuth:
 
 
 async def call_generation(
-    harness: Harness, *, body: Dict[str, Any], input_reference=None
+    harness: Harness, *, body: dict[str, Any], input_reference=None
 ):
     harness.read_body.return_value = body
     return await endpoints.video_generation(
@@ -323,6 +319,7 @@ async def call_content(harness: Harness, video_id: str, *, headers=None, query=N
         request=FakeRequest(headers=headers, query=query),
         fastapi_response=Response(),
         user_api_key_dict=_user(),
+        variant=query.get("variant") if query else None,
     )
 
 
@@ -354,6 +351,61 @@ async def test_content__plain_id_has_no_openai_default(harness):
     assert harness.processor_data() == {"video_id": "video_plain"}
 
 
+@pytest.mark.parametrize("path", ("/v1/videos/{video_id}/content", "/videos/{video_id}/content"))
+def test_content__declares_variant_query_parameter(path: str) -> None:
+    from fastapi import FastAPI
+
+    app: Final = FastAPI()
+    app.include_router(endpoints.router)
+    parameters: Final = app.openapi()["paths"][path]["get"]["parameters"]
+    variant: Final = next(parameter for parameter in parameters if parameter["name"] == "variant")
+
+    assert variant["in"] == "query"
+    assert variant["required"] is False
+    assert {"type": "string"} in variant["schema"]["anyOf"]
+
+
+@pytest.mark.parametrize("path", ("/v1/videos/video_plain/content", "/videos/video_plain/content"))
+@pytest.mark.parametrize("variant", (None, "thumbnail", "spritesheet"))
+def test_content__forwards_variant_over_http(harness: Harness, path: str, variant: str | None) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app: Final = FastAPI()
+    app.include_router(endpoints.router)
+    app.dependency_overrides[endpoints.user_api_key_auth] = _user
+    harness.base_process.return_value = b"content"
+
+    with TestClient(app) as client:
+        response: Final = client.get(path, params={"variant": variant} if variant is not None else {})
+
+    assert response.status_code == 200
+    assert response.content == b"content"
+    assert harness.processor_data() == (
+        {"video_id": "video_plain", "variant": variant} if variant is not None else {"video_id": "video_plain"}
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "media_type", "extension"),
+    (
+        (b"glTF\x02\x00\x00\x00", "model/gltf-binary", "glb"),
+        (b"\x89PNG\r\n\x1a\nimage", "image/png", "png"),
+        (b"\xff\xd8\xffimage", "image/jpeg", "jpg"),
+        (b"RIFF\x04\x00\x00\x00WEBPimage", "image/webp", "webp"),
+    ),
+)
+async def test_content__sniffs_media_bytes(harness: Harness, content: bytes, media_type: str, extension: str) -> None:
+    harness.base_process.return_value = content
+
+    response: Final = await call_content(harness, "video_plain")
+
+    assert response.body == content
+    assert response.media_type == media_type
+    assert response.headers["content-disposition"] == f"attachment; filename=video_video_plain.{extension}"
+
+
 @pytest.mark.asyncio
 async def test_content__model_encoded_id(harness):
     harness.base_process.return_value = b"x"
@@ -374,7 +426,7 @@ async def test_content__model_encoded_id(harness):
 
 
 async def call_edit(
-    harness: Harness, *, body: Dict[str, Any], headers=None, query=None
+    harness: Harness, *, body: dict[str, Any], headers=None, query=None
 ):
     harness.read_body.return_value = dict(body)
     return await endpoints.video_edit(

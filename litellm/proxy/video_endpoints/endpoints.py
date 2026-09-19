@@ -1,5 +1,6 @@
 #### Video Endpoints #####
 
+from types import MappingProxyType
 from typing import Final
 
 from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile
@@ -774,6 +775,20 @@ async def video_status(
         )
 
 
+def _video_content_media_type(content: object) -> tuple[str, str]:
+    if not isinstance(content, (bytes, bytearray)):
+        return "video/mp4", "mp4"
+    if content.startswith(b"glTF"):
+        return "model/gltf-binary", "glb"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", "jpg"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    return "video/mp4", "mp4"
+
+
 @router.get(
     "/v1/videos/{video_id}/content",
     dependencies=[Depends(user_api_key_auth)],
@@ -791,6 +806,7 @@ async def video_content(
     request: Request,
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    variant: str | None = None,
 ):
     """
     Video content endpoint for downloading video content.
@@ -819,33 +835,39 @@ async def video_content(
         version,
     )
 
-    # Create data with video_id
-    data: dict[str, object] = {"video_id": video_id}
+    decoded: Final = decode_video_id_with_provider(video_id)
+    provider_from_id: Final = decoded.get("custom_llm_provider")
+    model_id_from_decoded: Final = decoded.get("model_id")
 
-    decoded = decode_video_id_with_provider(video_id)
-    provider_from_id = decoded.get("custom_llm_provider")
-    model_id_from_decoded = decoded.get("model_id")
-
-    custom_llm_provider = (
+    custom_llm_provider: Final = (
         get_custom_llm_provider_from_request_headers(request=request)
         or get_custom_llm_provider_from_request_query(request=request)
         or await get_custom_llm_provider_from_request_body(request=request)
         or provider_from_id
     )
-    if custom_llm_provider:
-        data["custom_llm_provider"] = custom_llm_provider
-
-    # Resolve model_name from model_id if available
-    # This allows the router to automatically inject litellm_params from the model config
-    if model_id_from_decoded and llm_router:
-        resolved_model = llm_router.resolve_model_name_from_model_id(model_id_from_decoded)
-        if resolved_model:
-            data["model"] = resolved_model
+    resolved_model: Final = (
+        llm_router.resolve_model_name_from_model_id(model_id_from_decoded)
+        if model_id_from_decoded and llm_router
+        else None
+    )
+    data: Final = MappingProxyType(
+        {
+            key: value
+            for key, value in (
+                ("video_id", video_id),
+                ("variant", variant),
+                ("custom_llm_provider", custom_llm_provider),
+                ("model", resolved_model),
+            )
+            if value is not None and (key == "video_id" or value)
+        }
+    )
     # Process request using ProxyBaseLLMRequestProcessing
-    processor = ProxyBaseLLMRequestProcessing(data=data)
+    processor: Final = ProxyBaseLLMRequestProcessing(
+        data=dict(data),  # mutable-ok: the processor mutates its request data dictionary
+    )
     try:
-        # Call the video content function directly to get raw bytes
-        video_bytes = await processor.base_process_llm_request(
+        video_bytes: Final[object] = await processor.base_process_llm_request(
             request=request,
             fastapi_response=fastapi_response,
             user_api_key_dict=user_api_key_dict,
@@ -864,11 +886,11 @@ async def video_content(
             version=version,
         )
 
-        # Return raw video bytes with proper content type
+        media_type, extension = _video_content_media_type(video_bytes)
         return Response(
             content=video_bytes,
-            media_type="video/mp4",
-            headers={"Content-Disposition": f"attachment; filename=video_{video_id}.mp4"},
+            media_type=media_type,
+            headers={"Content-Disposition": f"attachment; filename=video_{video_id}.{extension}"},
         )
     except Exception as e:
         raise await processor._handle_llm_api_exception(
