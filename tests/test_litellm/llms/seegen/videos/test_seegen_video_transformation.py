@@ -33,11 +33,11 @@ def _response(payload: dict[str, JsonValue], status_code: int = 200) -> httpx.Re
     return httpx.Response(status_code, json=payload, request=request)
 
 
-def _transform_create(config, model: str, prompt: str, params: dict[str, JsonValue]):
+def _transform_create(config, model: str, prompt: str, params: dict[str, JsonValue], *, drop_params: bool = False):
     mapped = config.map_openai_params(
         video_create_optional_params=params,
         model=model,
-        drop_params=False,
+        drop_params=drop_params,
     )
     return config.transform_video_create_request(
         model=model,
@@ -1033,3 +1033,162 @@ def test_wan_rejects_frame_mode_with_empty_reference_and_populated_alias() -> No
                 "image_urls": ["https://cdn.example/ref.png"],
             },
         )
+
+
+PLATFORM_START = "https://storage.googleapis.com/nolgia-generations-prod/u/image/start.png?X-Goog-Signature=abc"
+PLATFORM_END = "https://storage.googleapis.com/nolgia-generations-prod/u/image/end.png?X-Goog-Signature=def"
+PLATFORM_USER = "dad27b53-a85b-4e3d-8fd6-b152c803a27c"
+REFERENCE = "https://assets.example/ref.png"
+REFERENCE_VIDEO = "https://assets.example/ref.mp4"
+
+
+def _ark_image(url: str, role: str) -> dict[str, JsonValue]:
+    return {"type": "image_url", "image_url": {"url": url}, "role": role}
+
+
+def test_seedance_platform_i2v_payload_sends_a_single_first_frame() -> None:
+    body, _, _ = _transform_create(
+        SeeGenSeedanceVideoConfig(SEEDANCE_MODEL),
+        SEEDANCE_MODEL,
+        "Slow push-in",
+        {
+            "duration_seconds": 4,
+            "generate_audio": False,
+            "image_url": PLATFORM_START,
+            "input_reference": PLATFORM_START,
+            "seconds": 4,
+            "size": "480x854",
+            "user": PLATFORM_USER,
+        },
+        drop_params=True,
+    )
+
+    assert body == {
+        "model": SEEDANCE_MODEL,
+        "content": [
+            {"type": "text", "text": "Slow push-in"},
+            _ark_image(PLATFORM_START, "first_frame"),
+        ],
+        "generate_audio": False,
+        "ratio": "9:16",
+        "duration": 4,
+        "resolution": "480p",
+    }
+
+
+def test_public_video_generation_posts_platform_start_and_end_frames_without_a_reference() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "model": SEEDANCE_MODEL,
+            "content": [
+                {"type": "text", "text": "Reveal the title"},
+                _ark_image(PLATFORM_START, "first_frame"),
+                _ark_image(PLATFORM_END, "last_frame"),
+            ],
+            "generate_audio": True,
+            "ratio": "9:16",
+            "duration": 5,
+            "resolution": "720p",
+        }
+        return httpx.Response(200, json={"id": "cgt-frames"}, request=request)
+
+    video = litellm.video_generation(
+        prompt="Reveal the title",
+        model=f"seegen/{SEEDANCE_MODEL}",
+        image_url=PLATFORM_START,
+        end_image_url=PLATFORM_END,
+        input_reference=PLATFORM_START,
+        seconds=5,
+        size="720x1280",
+        generate_audio=True,
+        user=PLATFORM_USER,
+        api_key="test-key",
+        client=HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(route))),
+        timeout=1,
+    )
+
+    assert decode_video_id_with_provider(video.id)["video_id"] == "cgt-frames"
+
+
+@pytest.mark.parametrize(
+    ("params", "expected_media"),
+    [
+        ({"input_reference": PLATFORM_START}, [_ark_image(PLATFORM_START, "first_frame")]),
+        (
+            {"input_reference": PLATFORM_START, "end_image_url": PLATFORM_END},
+            [_ark_image(PLATFORM_START, "first_frame"), _ark_image(PLATFORM_END, "last_frame")],
+        ),
+        (
+            {"image_url": PLATFORM_START, "end_image_url": PLATFORM_END, "image_urls": [PLATFORM_END, PLATFORM_START]},
+            [_ark_image(PLATFORM_START, "first_frame"), _ark_image(PLATFORM_END, "last_frame")],
+        ),
+        (
+            {"image_url": PLATFORM_START, "image_urls": [PLATFORM_START, REFERENCE]},
+            [_ark_image(PLATFORM_START, "first_frame"), _ark_image(REFERENCE, "reference_image")],
+        ),
+        (
+            {"input_reference": PLATFORM_START, "image_urls": [REFERENCE]},
+            [_ark_image(PLATFORM_START, "reference_image"), _ark_image(REFERENCE, "reference_image")],
+        ),
+        (
+            {"input_reference": PLATFORM_START, "video_urls": [REFERENCE_VIDEO]},
+            [
+                _ark_image(PLATFORM_START, "reference_image"),
+                {"type": "video_url", "video_url": {"url": REFERENCE_VIDEO}, "role": "reference_video"},
+            ],
+        ),
+    ],
+)
+def test_seedance_input_reference_is_the_start_frame_outside_reference_mode(
+    params: dict[str, JsonValue], expected_media: list[dict[str, JsonValue]]
+) -> None:
+    body, _, _ = _transform_create(SeeGenSeedanceVideoConfig(SEEDANCE_MODEL), SEEDANCE_MODEL, "prompt", params)
+
+    assert body["content"] == [{"type": "text", "text": "prompt"}, *expected_media]
+
+
+def test_wan_platform_i2v_payload_sends_a_single_first_frame() -> None:
+    body, _, _ = _transform_create(
+        SeeGenDashScopeVideoConfig(WAN_MODEL),
+        WAN_MODEL,
+        "Slow push-in",
+        {
+            "aspect_ratio": "16:9",
+            "duration_seconds": 5,
+            "generate_audio": True,
+            "image_url": PLATFORM_START,
+            "input_reference": PLATFORM_START,
+            "resolution": "720p",
+            "seconds": 5,
+            "user": PLATFORM_USER,
+        },
+        drop_params=True,
+    )
+
+    assert body == {
+        "model": WAN_MODEL,
+        "input": {"prompt": "Slow push-in", "media": [{"type": "first_frame", "url": PLATFORM_START}]},
+        "parameters": {"duration": 5, "resolution": "720P", "audio": True, "watermark": False},
+    }
+
+
+@pytest.mark.parametrize(
+    ("params", "expected_media"),
+    [
+        ({"input_reference": PLATFORM_START}, [{"type": "first_frame", "url": PLATFORM_START}]),
+        (
+            {"input_reference": PLATFORM_START, "end_image_url": PLATFORM_END},
+            [{"type": "first_frame", "url": PLATFORM_START}, {"type": "last_frame", "url": PLATFORM_END}],
+        ),
+        (
+            {"image_url": PLATFORM_START, "end_image_url": PLATFORM_END, "image_urls": [PLATFORM_START, PLATFORM_END]},
+            [{"type": "first_frame", "url": PLATFORM_START}, {"type": "last_frame", "url": PLATFORM_END}],
+        ),
+    ],
+)
+def test_wan_input_reference_is_the_start_frame_outside_reference_mode(
+    params: dict[str, JsonValue], expected_media: list[dict[str, JsonValue]]
+) -> None:
+    body, _, _ = _transform_create(SeeGenDashScopeVideoConfig(WAN_MODEL), WAN_MODEL, "prompt", params)
+
+    assert body["input"]["media"] == expected_media

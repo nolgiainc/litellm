@@ -7,6 +7,7 @@ from typing_extensions import assert_never
 from litellm.types.videos.main import VideoCreateOptionalRequestParams
 
 from ..common_utils import EMPTY_JSON_OBJECT, JsonValue, SeeGenError, parse_json_mapping
+from .frames import resolve_frame_media
 from .models import SeeGenVideoFamily, model_name
 
 STANDARD_PARAMS: Final = frozenset({"model", "prompt", "user", "extra_headers"})
@@ -109,23 +110,27 @@ def happyhorse_edit_media(params: Mapping[str, JsonValue]) -> tuple[Mapping[str,
 
 
 def wan_media(params: Mapping[str, JsonValue]) -> tuple[Mapping[str, JsonValue], ...]:
-    first_frames: Final = media_urls(params.get("image_url"), "image_url")
-    last_frames: Final = media_urls(params.get("end_image_url"), "end_image_url")
-    references: Final = reference_image_urls(params)
     videos: Final = media_urls(params.get("video_urls"), "video_urls")
     audios: Final = media_urls(params.get("audio_urls"), "audio_urls")
-    if len(first_frames) > 1 or len(last_frames) > 1:
+    frames: Final = resolve_frame_media(
+        image_url=media_urls(params.get("image_url"), "image_url"),
+        end_image_url=media_urls(params.get("end_image_url"), "end_image_url"),
+        input_reference=media_urls(params.get("input_reference"), "input_reference"),
+        image_urls=media_urls(params.get("image_urls"), "image_urls"),
+        reference_media=videos + audios,
+    )
+    if len(frames.first_frames) > 1 or len(frames.last_frames) > 1:
         raise SeeGenError(status_code=400, message="Wan accepts at most one first and last frame")
-    if len(references) > 10 or len(videos) > 5 or len(audios) > 5:
+    if len(frames.reference_images) > 10 or len(videos) > 5 or len(audios) > 5:
         raise SeeGenError(status_code=400, message="Wan reference media exceeds the vendor limits")
-    if (first_frames or last_frames) and (references or videos or audios):
+    if (frames.first_frames or frames.last_frames) and (frames.reference_images or videos or audios):
         raise SeeGenError(status_code=400, message="Wan frame mode and reference mode are mutually exclusive")
     return tuple(
         parse_json_mapping(MappingProxyType({"type": media_type, "url": url}))
         for media_type, urls in (
-            ("first_frame", first_frames),
-            ("last_frame", last_frames),
-            ("reference_image", references),
+            ("first_frame", frames.first_frames),
+            ("last_frame", frames.last_frames),
+            ("reference_image", frames.reference_images),
             ("reference_video", videos),
             ("reference_audio", audios),
         )

@@ -16,6 +16,7 @@ from litellm.videos.capabilities import CapabilityParamSupport, DeclaredCapabili
 
 from ..common_utils import EMPTY_JSON_OBJECT, JsonValue, SeeGenError, parse_json_mapping
 from .base import SeeGenVideoConfig
+from .frames import resolve_frame_media
 from .models import model_name, video_family
 from .seedance_parameters import (
     CAPABILITIES,
@@ -142,9 +143,19 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
     ) -> tuple[dict[str, JsonValue], RequestFiles, str]:  # mutable-ok: BaseVideoConfig requires a dict body
         params: Final = parse_json_mapping(video_create_optional_request_params)
         text_content: Final = parse_json_mapping(MappingProxyType({"type": "text", "text": prompt}))
+        video_urls: Final = media_urls(params.get("video_urls"), "video_urls")
+        audio_urls: Final = media_urls(params.get("audio_urls"), "audio_urls")
+        frames: Final = resolve_frame_media(
+            image_url=media_urls(params.get("image_url"), "first_frame"),
+            end_image_url=media_urls(params.get("end_image_url"), "last_frame"),
+            input_reference=media_urls(params.get("input_reference"), "input_reference"),
+            image_urls=media_urls(params.get("image_urls"), "image_urls"),
+            reference_media=video_urls + audio_urls,
+        )
         image_roles: Final = (
-            (params.get("image_url"), "first_frame"),
-            (params.get("end_image_url"), "last_frame"),
+            (frames.first_frames, "first_frame"),
+            (frames.last_frames, "last_frame"),
+            (frames.reference_images, "reference_image"),
         )
         image_content: Final = tuple(
             parse_json_mapping(
@@ -156,22 +167,8 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
                     }
                 )
             )
-            for value, role in image_roles
-            for url in media_urls(value, role)
-        )
-        reference_keys: Final = ("input_reference", "image_urls")
-        reference_content: Final = tuple(
-            parse_json_mapping(
-                MappingProxyType(
-                    {
-                        "type": "image_url",
-                        "image_url": parse_json_mapping(MappingProxyType({"url": url})),
-                        "role": "reference_image",
-                    }
-                )
-            )
-            for key in reference_keys
-            for url in media_urls(params.get(key), key)
+            for urls, role in image_roles
+            for url in urls
         )
         video_content: Final = tuple(
             parse_json_mapping(
@@ -183,7 +180,7 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
                     }
                 )
             )
-            for url in media_urls(params.get("video_urls"), "video_urls")
+            for url in video_urls
         )
         audio_content: Final = tuple(
             parse_json_mapping(
@@ -195,10 +192,10 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
                     }
                 )
             )
-            for url in media_urls(params.get("audio_urls"), "audio_urls")
+            for url in audio_urls
         )
         content: Final = _JSON_LIST_ADAPTER.validate_python(
-            (text_content, *image_content, *reference_content, *video_content, *audio_content)
+            (text_content, *image_content, *video_content, *audio_content)
         )
         media_keys: Final = frozenset(
             {"image_url", "end_image_url", "input_reference", "image_urls", "video_urls", "audio_urls"}
