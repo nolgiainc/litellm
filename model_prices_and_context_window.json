@@ -20905,6 +20905,36 @@
             "image"
         ]
     },
+    "fal_ai/fal-ai/bria/background/remove": {
+        "litellm_provider": "fal_ai",
+        "mode": "image_generation",
+        "output_cost_per_image": 0.018,
+        "source": "https://fal.ai/models/fal-ai/bria/background/remove",
+        "supported_endpoints": [
+            "/v1/images/generations"
+        ],
+        "metadata": {
+            "comment": "Flat $0.018 per generation with no size term; unlike clarity-upscaler, delivered-dimension reporting is not needed."
+        }
+    },
+    "fal_ai/bria/video/background-removal/v3": {
+        "litellm_provider": "fal_ai",
+        "mode": "video_generation",
+        "output_cost_per_second": 0.05,
+        "source": "https://fal.ai/models/bria/video/background-removal/v3",
+        "supported_endpoints": [
+            "/v1/videos"
+        ],
+        "supported_modalities": [
+            "video"
+        ],
+        "supported_output_modalities": [
+            "video"
+        ],
+        "metadata": {
+            "comment": "Flat $0.05 per second of SOURCE clip, resolution-independent; caller must send seconds. The sibling bria/video/background-removal without /v3 is the same model family at $0.14/s and must not be wired. fal-ai/bria/video/background-removal does not exist."
+        }
+    },
     "fal_ai/fal-ai/seedvr/upscale/video": {
         "litellm_provider": "fal_ai",
         "mode": "video_generation",

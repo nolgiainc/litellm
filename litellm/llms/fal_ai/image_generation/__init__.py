@@ -4,6 +4,7 @@ from litellm.llms.base_llm.image_generation.transformation import (
     BaseImageGenerationConfig,
 )
 
+from .background_removal_transformation import FalAIBackgroundRemovalConfig
 from .bria_transformation import FalAIBriaConfig
 from .bytedance_transformation import (
     FalAIBytedanceDreaminaV31Config,
@@ -29,6 +30,7 @@ from .vendor_app_transformation import (
 )
 
 __all__ = [
+    "FalAIBackgroundRemovalConfig",
     "FalAIBaseConfig",
     "FalAIBriaConfig",
     "FalAIBytedanceDreaminaV31Config",
@@ -60,6 +62,7 @@ _CONFIG_BY_SUBSTRINGS: tuple[tuple[tuple[str, ...], Callable[[], BaseImageGenera
     (("imagen4",), FalAIImagen4Config),
     (("imagen-4",), FalAIImagen4Config),
     (("recraft",), FalAIRecraftV3Config),
+    (("bria/background/remove",), FalAIBackgroundRemovalConfig),
     (("bria",), FalAIBriaConfig),
     (("flux-pro", "ultra"), FalAIFluxProV11UltraConfig),
     (("flux-pro",), FalAIFluxProV11Config),

@@ -2,6 +2,7 @@ import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from json import JSONDecodeError, loads
+from math import isfinite
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 import httpx
@@ -82,11 +83,13 @@ _REFERENCE_FIELD_BY_MODEL_MARKER: tuple[tuple[str, _ReferenceField], ...] = (
     ("hyper3d", _ReferenceField(name="input_image_urls", is_list=True)),
     ("kling-video/v3", _ReferenceField(name="start_image_url", is_list=False)),
     ("seedance-2.0/reference-to-video", _ReferenceField(name="image_urls", is_list=True)),
+    ("bria/video/background-removal", _ReferenceField(name="video_url", is_list=False, fallback_content_type="video/mp4")),
     ("seedvr/upscale/video", _ReferenceField(name="video_url", is_list=False, fallback_content_type="video/mp4")),
 )
 
 _MESH_MODEL_MARKERS: Final = ("hunyuan3d", "trellis", "hyper3d")
-_PROMPTLESS_MODEL_MARKERS: Final = ("seedvr/upscale/video", *_MESH_MODEL_MARKERS)
+_BACKGROUND_REMOVAL_MODEL_MARKER: Final = "bria/video/background-removal"
+_PROMPTLESS_MODEL_MARKERS: Final = ("seedvr/upscale/video", _BACKGROUND_REMOVAL_MODEL_MARKER, *_MESH_MODEL_MARKERS)
 
 # Resolution knobs whose value selects the billed output tier for megapixel-priced apps.
 _RESOLUTION_REQUEST_KEYS: tuple[str, ...] = ("target_resolution", "resolution")
@@ -380,6 +383,8 @@ class FalAIVideoConfig(BaseVideoConfig):
         capability vocabulary, so every other param still flows through untouched.
         """
         normalized = model.lower()
+        if _BACKGROUND_REMOVAL_MODEL_MARKER in normalized:
+            return DeclaredCapabilityParams(frozenset(("input_reference",)))
         if _UPSCALE_MODEL_MARKER in normalized or any(marker in normalized for marker in _MESH_MODEL_MARKERS):
             return DeclaredCapabilityParams(_UPSCALE_CAPABILITY_PARAMS)
         if _H3_MAX_I2V_MODEL_MARKER in normalized:
@@ -418,6 +423,8 @@ class FalAIVideoConfig(BaseVideoConfig):
             mapped["duration"] = str(seconds)
 
         size = video_create_optional_params.get("size")
+        if _BACKGROUND_REMOVAL_MODEL_MARKER in model.lower() and size is not None:
+            raise ValueError("Bria background removal does not support: size")
         if isinstance(size, str):
             aspect = _SIZE_TO_ASPECT_RATIO.get(size)
             if aspect is not None:
@@ -496,6 +503,24 @@ class FalAIVideoConfig(BaseVideoConfig):
         request_data: dict[str, Any] = {"prompt": prompt} if prompt else {}
         request_data.update(video_create_optional_request_params)
         request_data.pop("model", None)
+
+        if _BACKGROUND_REMOVAL_MODEL_MARKER in model_id.lower():
+            unsupported = {"aspect_ratio", "resolution", "target_resolution", "size"} & request_data.keys()
+            if unsupported:
+                raise ValueError(f"Bria background removal does not support: {', '.join(sorted(unsupported))}")
+            request_data.pop("prompt", None)
+            request_data.setdefault("background_color", "Transparent")
+            request_data.setdefault("output_container_and_codec", "webm_vp9")
+            video_url = request_data.get("video_url")
+            if isinstance(video_url, str) and video_url.strip().lower().startswith("data:"):
+                raise ValueError("Bria background removal requires a hosted video_url; data URIs are unsupported")
+            # fal bills the source clip, but its queue response supplies no duration.
+            try:
+                seconds = float(request_data.get("duration", ""))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Bria background removal requires positive source clip seconds for cost tracking") from exc
+            if not isfinite(seconds) or seconds <= 0:
+                raise ValueError("Bria background removal requires positive source clip seconds for cost tracking")
 
         return request_data, [], f"{api_base}/{model_id}"
 
