@@ -26,6 +26,9 @@ from litellm.llms.base_llm import BaseImageEditConfig, BaseImageGenerationConfig
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
 from litellm.llms.custom_llm import CustomLLM
+from litellm.llms.fal_ai.image_generation.background_removal_transformation import (
+    FalAIBackgroundRemovalConfig,
+)
 from litellm.utils import exception_type, get_litellm_params
 
 #################### Initialize provider clients ####################
@@ -138,7 +141,7 @@ async def aimage_generation(*args, **kwargs) -> ImageResponse:
 # Overload for when aimg_generation=True (returns Coroutine)
 @overload
 def image_generation(
-    prompt: str,
+    prompt: str | None = None,
     model: str | None = None,
     n: int | None = None,
     quality: str | ImageGenerationRequestQuality | None = None,
@@ -162,7 +165,7 @@ def image_generation(
 # Overload for when aimg_generation=False or not specified (returns ImageResponse)
 @overload
 def image_generation(
-    prompt: str,
+    prompt: str | None = None,
     model: str | None = None,
     n: int | None = None,
     quality: str | ImageGenerationRequestQuality | None = None,
@@ -186,7 +189,7 @@ def image_generation(
 
 @client
 def image_generation(
-    prompt: str,
+    prompt: str | None = None,
     model: str | None = None,
     n: int | None = None,
     quality: str | ImageGenerationRequestQuality | None = None,
@@ -264,6 +267,14 @@ def image_generation(
                 model=base_model or model,
                 provider=LlmProviders(custom_llm_provider),
             )
+
+        if prompt is None and not isinstance(image_generation_config, FalAIBackgroundRemovalConfig):
+            raise litellm.BadRequestError(
+                message="image_generation requires a prompt for this model",
+                model=model or "",
+                llm_provider=custom_llm_provider or "",
+            )
+        generation_prompt: Final = prompt if prompt is not None else ""
 
         optional_params: Final = get_optional_params_image_gen(
             model=base_model or model,
@@ -361,7 +372,7 @@ def image_generation(
 
             model_response = azure_chat_completions.image_generation(
                 model=model,
-                prompt=prompt,
+                prompt=generation_prompt,
                 timeout=timeout,
                 api_key=api_key,
                 api_base=api_base,
@@ -404,7 +415,7 @@ def image_generation(
             return llm_http_handler.image_generation_handler(
                 api_key=api_key,
                 model=model,
-                prompt=prompt,
+                prompt=generation_prompt,
                 image_generation_provider_config=image_generation_config,
                 image_generation_optional_request_params=optional_params,
                 custom_llm_provider=custom_llm_provider,
@@ -419,7 +430,7 @@ def image_generation(
                 raise Exception("Model needs to be set for black_forest_labs")
             return bfl_image_generation.image_generation(
                 model=model,
-                prompt=prompt,
+                prompt=generation_prompt,
                 model_response=model_response,
                 optional_params=optional_params,
                 litellm_params=litellm_params_dict,
@@ -440,7 +451,7 @@ def image_generation(
             )
             return seegen_image_generation.image_generation(
                 model=model,
-                prompt=prompt,
+                prompt=generation_prompt,
                 model_response=model_response,
                 optional_params=seegen_optional_params,
                 litellm_params=seegen_litellm_params,
@@ -480,7 +491,7 @@ def image_generation(
 
             model_response = azure_chat_completions.image_generation(
                 model=model,
-                prompt=prompt,
+                prompt=generation_prompt,
                 timeout=timeout,
                 api_key=api_key,
                 api_base=api_base,
@@ -506,7 +517,7 @@ def image_generation(
             organization: Final[str | None] = kwargs.get("organization", None)
             model_response = openai_chat_completions.image_generation(
                 model=model,
-                prompt=prompt,
+                prompt=generation_prompt,
                 timeout=timeout,
                 api_key=api_key or dynamic_api_key,
                 api_base=api_base,
@@ -523,7 +534,7 @@ def image_generation(
                 raise Exception("Model needs to be set for bedrock")
             model_response = bedrock_image_generation.image_generation(
                 model=model,
-                prompt=prompt,
+                prompt=generation_prompt,
                 timeout=timeout,
                 logging_obj=litellm_logging_obj,
                 optional_params=optional_params,
@@ -552,7 +563,7 @@ def image_generation(
                 ## CALL FUNCTION
                 model_response = custom_handler.aimage_generation(
                     model=model,
-                    prompt=prompt,
+                    prompt=generation_prompt,
                     api_key=api_key,
                     api_base=api_base,
                     model_response=model_response,
@@ -569,7 +580,7 @@ def image_generation(
                 ## CALL FUNCTION
                 model_response = custom_handler.image_generation(
                     model=model,
-                    prompt=prompt,
+                    prompt=generation_prompt,
                     api_key=api_key,
                     api_base=api_base,
                     model_response=model_response,

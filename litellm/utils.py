@@ -1057,7 +1057,8 @@ def function_setup(
         elif call_type == CallTypes.embedding.value or call_type == CallTypes.aembedding.value:
             messages = args[1] if len(args) > 1 else kwargs.get("input", None)
         elif call_type == CallTypes.image_generation.value or call_type == CallTypes.aimage_generation.value:
-            messages = args[0] if len(args) > 0 else kwargs["prompt"]
+            image_prompt: Final = args[0] if len(args) > 0 else kwargs.get("prompt")
+            messages = "" if image_prompt is None else image_prompt
         elif call_type == CallTypes.moderation.value or call_type == CallTypes.amoderation.value:
             messages = args[1] if len(args) > 1 else kwargs["input"]
         elif call_type == CallTypes.atext_completion.value or call_type == CallTypes.text_completion.value:

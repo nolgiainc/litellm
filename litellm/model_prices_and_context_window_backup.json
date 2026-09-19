@@ -21006,7 +21006,7 @@
             "video"
         ],
         "metadata": {
-            "comment": "Flat $0.05 per second of SOURCE clip, resolution-independent; caller must send seconds. The sibling bria/video/background-removal without /v3 is the same model family at $0.14/s and must not be wired. fal-ai/bria/video/background-removal does not exist."
+            "comment": "Flat $0.05 per second of SOURCE clip, resolution-independent. New submissions are disabled pending trusted duration validation bound to immutable source media; caller seconds are not authoritative. The sibling bria/video/background-removal without /v3 is the same model family at $0.14/s and must not be wired. fal-ai/bria/video/background-removal does not exist."
         }
     },
     "fal_ai/fal-ai/seedvr/upscale/video": {

@@ -775,8 +775,57 @@ async def video_status(
         )
 
 
+def _ebml_element_bounds(content: bytes | bytearray, offset: int, limit: int) -> tuple[int, int, int] | None:
+    if offset >= limit or content[offset] == 0:
+        return None
+    id_width: Final = 9 - content[offset].bit_length()
+    size_offset: Final = offset + id_width
+    if id_width > 4 or size_offset >= limit or content[size_offset] == 0:
+        return None
+    element_id: Final = int.from_bytes(content[offset:size_offset], "big")
+    id_marker: Final = 1 << (7 * id_width)
+    if element_id in (id_marker, 2 * id_marker - 1):
+        return None
+    size_width: Final = 9 - content[size_offset].bit_length()
+    data_offset: Final = size_offset + size_width
+    if data_offset > limit:
+        return None
+    size_mask: Final = (1 << (7 * size_width)) - 1
+    size: Final = int.from_bytes(content[size_offset:data_offset], "big") & size_mask
+    data_end: Final = data_offset + size
+    if size == size_mask or data_end > limit:
+        return None
+    return element_id, data_offset, data_end
+
+
+def _ebml_header_doctype(
+    content: bytes | bytearray,
+    offset: int,
+    limit: int,
+    remaining_elements: int = 64,
+    doc_type: bytes | None = None,
+) -> bytes | None:
+    if offset == limit:
+        return doc_type
+    if remaining_elements == 0:
+        return None
+    element: Final = _ebml_element_bounds(content, offset, limit)
+    if element is None:
+        return None
+    element_id, data_offset, data_end = element
+    if element_id == 0x4282 and doc_type is not None:
+        return None
+    next_doc_type: Final = bytes(content[data_offset:data_end]) if element_id == 0x4282 else doc_type
+    return _ebml_header_doctype(content, data_end, limit, remaining_elements - 1, next_doc_type)
+
+
 def _video_content_media_type(content: object) -> tuple[str, str]:
     if not isinstance(content, (bytes, bytearray)):
+        return "video/mp4", "mp4"
+    if content.startswith(b"\x1a\x45\xdf\xa3"):
+        header: Final = _ebml_element_bounds(content, 0, min(len(content), 4096))
+        if header is not None and _ebml_header_doctype(content, header[1], header[2]) == b"webm":
+            return "video/webm", "webm"
         return "video/mp4", "mp4"
     if content.startswith(b"glTF"):
         return "model/gltf-binary", "glb"
