@@ -65504,7 +65504,9 @@ export interface operations {
     };
     video_content_v1_videos__video_id__content_get: {
         parameters: {
-            query?: never;
+            query?: {
+                variant?: string | null;
+            };
             header?: never;
             path: {
                 video_id: string;
@@ -67871,7 +67873,9 @@ export interface operations {
     };
     video_content_videos__video_id__content_get: {
         parameters: {
-            query?: never;
+            query?: {
+                variant?: string | null;
+            };
             header?: never;
             path: {
                 video_id: string;
