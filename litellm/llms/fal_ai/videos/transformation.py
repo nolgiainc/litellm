@@ -92,6 +92,9 @@ _REFERENCE_FIELD_BY_MODEL_MARKER: tuple[tuple[str, _ReferenceField], ...] = (
 
 _MESH_MODEL_MARKERS: Final = ("hunyuan3d", "trellis", "hyper3d")
 _BACKGROUND_REMOVAL_MODEL_MARKER: Final = "bria/video/background-removal"
+_BACKGROUND_REMOVAL_SECONDS_MESSAGE: Final = (
+    "Bria background removal requires positive source clip seconds for cost tracking"
+)
 _PROMPTLESS_MODEL_MARKERS: Final = ("seedvr/upscale/video", _BACKGROUND_REMOVAL_MODEL_MARKER, *_MESH_MODEL_MARKERS)
 
 # Resolution knobs whose value selects the billed output tier for megapixel-priced apps.
@@ -519,15 +522,18 @@ class FalAIVideoConfig(BaseVideoConfig):
             video_url: Final = request_data.get("video_url")
             if isinstance(video_url, str) and video_url.strip().lower().startswith("data:"):
                 raise ValueError("Bria background removal requires a hosted video_url; data URIs are unsupported")
-            # fal bills the source clip, but its queue response supplies no duration.
+            # fal bills the source clip, but its queue response supplies no duration,
+            # so a submission without one could only ever record $0 (the NOL-519 class).
+            # Refuse it here, before the job exists, rather than at costing time.
+            raw_duration: object = request_data.get("duration")
+            if not isinstance(raw_duration, (str, int, float)) or isinstance(raw_duration, bool):
+                raise ValueError(_BACKGROUND_REMOVAL_SECONDS_MESSAGE)
             try:
-                seconds: Final = float(request_data.get("duration", ""))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "Bria background removal requires positive source clip seconds for cost tracking"
-                ) from exc
+                seconds: Final = float(raw_duration)
+            except ValueError as exc:
+                raise ValueError(_BACKGROUND_REMOVAL_SECONDS_MESSAGE) from exc
             if not isfinite(seconds) or seconds <= 0:
-                raise ValueError("Bria background removal requires positive source clip seconds for cost tracking")
+                raise ValueError(_BACKGROUND_REMOVAL_SECONDS_MESSAGE)
 
         return request_data, [], f"{api_base}/{model_id}"
 
