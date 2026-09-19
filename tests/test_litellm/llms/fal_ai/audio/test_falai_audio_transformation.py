@@ -103,6 +103,8 @@ class TestFalAIAudioBasics:
         [
             ("fal_ai/fal-ai/kokoro/american-english", 1.2, False),
             ("fal-ai/kokoro/american-english", 1, False),
+            ("fal_ai/fal-ai/kokoro/american-english", 0.25, False),
+            ("fal_ai/fal-ai/kokoro/american-english", 4.0, False),
             ("fal_ai/fal-ai/minimax/speech-2.8-hd", 0.9, True),
             ("fal-ai/minimax/speech-2.8-turbo", "1.25", True),
         ],
@@ -120,6 +122,16 @@ class TestFalAIAudioBasics:
             assert body["speed"] == float(speed)
             assert isinstance(body["speed"], float)
             assert "voice_setting" not in body
+
+    @pytest.mark.parametrize("model", ["fal_ai/fal-ai/minimax/speech-2.8-hd", "fal-ai/minimax/speech-2.8-turbo"])
+    @pytest.mark.parametrize(
+        ("speed", "expected"), [(0.25, 0.5), (0.5, 0.5), (1.25, 1.25), (2.0, 2.0), (4.0, 2.0), ("4.0", 2.0)]
+    )
+    def test_transform_request_clamps_minimax_speed(self, model: str, speed: float | str, expected: float) -> None:
+        request: Final = self.config.transform_text_to_speech_request(
+            model=model, input="hello", voice=None, optional_params={"speed": speed}, litellm_params={}, headers={}
+        )
+        assert request["dict_body"] == {"text": "hello", "prompt": "hello", "voice_setting": {"speed": expected}}
 
     @pytest.mark.parametrize("from_extra_body", [False, True])
     def test_transform_request_merges_minimax_speed(self, from_extra_body: bool) -> None:

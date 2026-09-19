@@ -132,7 +132,10 @@ class FalAIAudioConfig(BaseTextToSpeechConfig):
         minimax_request: Final[TextToSpeechRequestData] = {
             "dict_body": {
                 **body,
-                "voice_setting": {**(voice_setting if isinstance(voice_setting, dict) else {}), "speed": speed},
+                "voice_setting": {
+                    **(voice_setting if isinstance(voice_setting, dict) else {}),
+                    "speed": max(0.5, min(2.0, speed)),
+                },
             },
             "headers": {},
         }
