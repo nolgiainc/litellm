@@ -2,6 +2,7 @@ import base64
 import math
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from json import JSONDecodeError
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
@@ -48,6 +49,90 @@ else:
 _TEXT_TO_VIDEO = "text2video"
 _IMAGE_TO_VIDEO = "image2video"
 _MOTION_CONTROL: Final = "motion-control"
+_AVATAR: Final = "avatar/image2video"
+
+
+@dataclass(frozen=True, slots=True)
+class _ModelConstraints:
+    modes: frozenset[str]
+    durations: frozenset[int] | range
+    sound_modes: frozenset[str]
+
+
+# Measured on the classic AK/SK surface on 2026-09-19: v2 accepts only 5s/10s.
+# Both v2 routes ship silent: their audio cannot be priced by resolution alone.
+_MODEL_CONSTRAINTS: Final[Mapping[str, _ModelConstraints]] = MappingProxyType(
+    {  # mutable-ok: frozen model constraint registry
+        "kling-v3": _ModelConstraints(frozenset(("std", "pro", "4k")), range(3, 16), frozenset(("std", "pro", "4k"))),
+        "kling-v2-6": _ModelConstraints(frozenset(("std", "pro")), frozenset((5, 10)), frozenset()),
+        "kling-v2-5-turbo": _ModelConstraints(frozenset(("std", "pro")), frozenset((5, 10)), frozenset()),
+    }
+)
+
+
+class _CatalogParams(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    mode: str = "pro"
+    duration: SkipValidation[str | float | None] = None
+    generate_audio: bool | None = None
+    sound: str | None = None
+
+
+def _validate_catalog_params(params: _CatalogParams, model: str) -> None:
+    constraints: Final = _MODEL_CONSTRAINTS.get(strip_kling_prefix(model), _MODEL_CONSTRAINTS["kling-v3"])
+    mode: Final = params.mode
+    if mode not in constraints.modes:
+        raise litellm.BadRequestError(
+            message=f"Kling model '{model}' does not support mode '{mode}'; Kling publishes no 4K tier for it."
+            if mode == "4k"
+            else f"Kling model '{model}' does not support mode '{mode}'; use {sorted(constraints.modes)}.",
+            model=model,
+            llm_provider=litellm.LlmProviders.KLING.value,
+        )
+    if (params.generate_audio or params.sound == "on") and mode not in constraints.sound_modes:
+        raise litellm.BadRequestError(
+            message=(
+                f"Kling model '{model}' is silent only: the vendor allows audio only at pro, where it costs "
+                "1.0 U/s against 0.5 silent; the per-resolution price map cannot express this, so an audio "
+                "tier would be mis-billed."
+                if strip_kling_prefix(model) == "kling-v2-6"
+                else f"Kling model '{model}' is silent only: the vendor accepts the audio flag but publishes "
+                "no price for it, so the render would be billed at the silent rate it did not produce."
+            ),
+            model=model,
+            llm_provider=litellm.LlmProviders.KLING.value,
+        )
+    if params.duration is not None:
+        error: Final = litellm.BadRequestError(
+            message=f"Kling model '{model}': only 5 and 10 second clips exist."
+            if isinstance(constraints.durations, frozenset)
+            else f"Kling model '{model}' requires an integer seconds value from 3 through 15.",
+            model=model,
+            llm_provider=litellm.LlmProviders.KLING.value,
+        )
+        try:
+            duration: Final = float(params.duration)
+        except (TypeError, ValueError) as exc:
+            raise error from exc
+        if isinstance(params.duration, bool) or not math.isfinite(duration) or duration not in constraints.durations:
+            raise error
+
+
+class _AvatarParams(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    input_reference: SkipValidation[FileTypes | None] = None
+    image_url: SkipValidation[FileTypes | None] = None
+    image_urls: str | tuple[SkipValidation[str | FileTypes], ...] | None = None
+    audio_urls: str | tuple[str, ...] | None = None
+    seconds: SkipValidation[str | float | None] = None
+    resolution: str | None = None
+    mode: str = "std"
+    prompt: str | None = None
+    watermark_info: Mapping[str, bool] | None = None
+    external_task_id: str | None = None
+    callback_url: str | None = None
 
 
 class _MotionControlParams(BaseModel):
@@ -73,13 +158,11 @@ def _motion_control_model_name(model: str) -> str | None:
     return bare.removesuffix(suffix) if bare.endswith(suffix) else None
 
 
-def _motion_control_billed_seconds(logging_obj: "LiteLLMLoggingObj") -> str | None:
+def _logged_billed_seconds(logging_obj: "LiteLLMLoggingObj") -> str | None:
     optional_params: Final = getattr(logging_obj, "optional_params", None)
     seconds: Final = optional_params.get("seconds") if isinstance(optional_params, Mapping) else None
     if seconds is None:
-        verbose_logger.warning(
-            "Kling motion control: no billed duration on the logged params, so this generation records $0 COGS"
-        )
+        verbose_logger.warning("Kling: no billed duration on the logged params, so this generation records $0 COGS")
         return None
     return str(seconds)
 
@@ -215,7 +298,7 @@ class KlingVideoConfig(BaseVideoConfig):
     DEFAULT_RESOLUTION = "1080p"
 
     def supports_promptless_video_create(self, model: str) -> bool:
-        return _motion_control_model_name(model) is not None
+        return _motion_control_model_name(model) is not None or strip_kling_prefix(model).endswith("-avatar")
 
     def get_capability_param_support(self, model: str) -> CapabilityParamSupport:
         """
@@ -224,7 +307,7 @@ class KlingVideoConfig(BaseVideoConfig):
         negative_prompt is deliberately NOT declared, and this one is a judgement call
         rather than a documented fact. Kling's classic request table carries the field,
         but the only version-specific statement found says models 2.5, 2.6 and 3.0 do
-        not honor it, and every model routed here is kling-v3. The vendor's own docs
+        not honor it. The vendor's own docs
         would settle it; they are not machine-readable from CI. Undeclared means a 400
         rather than a render that quietly ignored the exclusion, which is the failure
         mode this gate exists to remove, and it is a one-line change to flip once a
@@ -241,10 +324,14 @@ class KlingVideoConfig(BaseVideoConfig):
         """
         if _motion_control_model_name(model) is not None:
             return DeclaredCapabilityParams(frozenset(("input_reference", "image_url", "image_urls", "video_urls")))
+        if strip_kling_prefix(model).endswith("-avatar"):
+            return DeclaredCapabilityParams(frozenset(("input_reference", "image_url", "image_urls", "audio_urls")))
+        if not _MODEL_CONSTRAINTS.get(strip_kling_prefix(model), _MODEL_CONSTRAINTS["kling-v3"]).sound_modes:
+            return DeclaredCapabilityParams(_CAPABILITY_PARAMS - frozenset(("generate_audio",)))
         return DeclaredCapabilityParams(_CAPABILITY_PARAMS)
 
     def get_supported_openai_params(self, model: str) -> list[str]:
-        if _motion_control_model_name(model) is not None:
+        if self.supports_promptless_video_create(model):
             return [  # mutable-ok: BaseVideoConfig requires a list of supported parameter names
                 "model",
                 "prompt",
@@ -260,7 +347,11 @@ class KlingVideoConfig(BaseVideoConfig):
             "input_reference",
             "seconds",
             "size",
-            "generate_audio",
+            *(
+                ("generate_audio",)
+                if _MODEL_CONSTRAINTS.get(strip_kling_prefix(model), _MODEL_CONSTRAINTS["kling-v3"]).sound_modes
+                else ()
+            ),
             "user",
             "extra_headers",
             "extra_body",
@@ -310,6 +401,10 @@ class KlingVideoConfig(BaseVideoConfig):
             return dict(  # mutable-ok: the video pipeline mutates the mapped optional-parameter dict
                 self._map_motion_control_params(_MotionControlParams.model_validate(params), model)
             )
+        if strip_kling_prefix(model).endswith("-avatar"):
+            return dict(  # mutable-ok: the video pipeline mutates mapped optional parameters
+                self._map_avatar_params(_AvatarParams.model_validate(params), model)
+            )
 
         mapped: dict[str, Any] = {}
 
@@ -337,14 +432,24 @@ class KlingVideoConfig(BaseVideoConfig):
             mapped["image"] = start_image
 
         generate_audio = params.get("generate_audio")
-        if generate_audio is not None:
+        constraints: Final = _MODEL_CONSTRAINTS.get(strip_kling_prefix(model), _MODEL_CONSTRAINTS["kling-v3"])
+        if generate_audio is not None and constraints.sound_modes:
             mapped["sound"] = "on" if generate_audio else "off"
 
         supported = self.get_supported_openai_params(model)
-        handled = {"resolution", "image_url"}  # mutable-ok: local lookup set, never mutated
+        handled = {"resolution", "image_url", "generate_audio"}  # mutable-ok: local lookup set, never mutated
         for key, value in params.items():
             if key not in supported and key not in handled and key not in mapped:
                 mapped[key] = value
+
+        _validate_catalog_params(
+            _CatalogParams.model_validate(
+                {**mapped, "generate_audio": generate_audio}  # mutable-ok: Pydantic input for catalog constraints
+            ),
+            model,
+        )
+        if not constraints.sound_modes:
+            mapped["sound"] = "off"
 
         if self._is_image_to_video_model(model) and not mapped.get("image"):
             raise litellm.BadRequestError(
@@ -359,6 +464,74 @@ class KlingVideoConfig(BaseVideoConfig):
             )
 
         return mapped
+
+    def _map_avatar_params(self, params: _AvatarParams, model: str) -> Mapping[str, str | Mapping[str, bool]]:
+        mode: Final = (
+            self.RESOLUTION_TO_MODE.get(str(params.resolution).strip().lower())
+            if params.resolution is not None
+            else params.mode
+        )
+        if mode not in ("std", "pro"):
+            raise litellm.BadRequestError(
+                message="Use 720p or 1080p: Kling accepts 4K avatar mode but publishes no 4K avatar price.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        images: Final = (params.image_urls,) if isinstance(params.image_urls, str) else tuple(params.image_urls or ())
+        if len(images) > 1:
+            raise litellm.BadRequestError(
+                message=f"Kling avatar requires exactly one portrait via image_urls; got {len(images)} images.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        image: Final = (
+            self._coerce_start_image(images[0] if images else None)
+            or self._coerce_start_image(params.input_reference)
+            or self._coerce_start_image(params.image_url)
+        )
+        if not image:
+            raise litellm.BadRequestError(
+                message="Kling avatar requires a portrait via image_urls, input_reference or image_url.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        audio: Final = (params.audio_urls,) if isinstance(params.audio_urls, str) else tuple(params.audio_urls or ())
+        if len(audio) != 1 or not audio[0].strip():
+            raise litellm.BadRequestError(
+                message="Kling avatar requires exactly one voice track via audio_urls.",
+                model=model,
+                llm_provider=litellm.LlmProviders.KLING.value,
+            )
+        duration_error: Final = litellm.BadRequestError(
+            message=(
+                "Kling avatar bills per second of output; declare the voice track's duration as a positive seconds "
+                "value so a render cannot be submitted at an unpriced zero duration."
+            ),
+            model=model,
+            llm_provider=litellm.LlmProviders.KLING.value,
+        )
+        try:
+            duration: Final = float(params.seconds) if params.seconds is not None else 0.0
+        except (TypeError, ValueError) as exc:
+            raise duration_error from exc
+        if isinstance(params.seconds, bool) or not math.isfinite(duration) or duration <= 0:
+            raise duration_error
+        return MappingProxyType(
+            {  # mutable-ok: frozen mapped params; seconds stays in logging only
+                key: value
+                for key, value in (
+                    ("mode", mode),
+                    ("seconds", str(params.seconds)),
+                    ("image", image),
+                    ("sound_file", audio[0]),
+                    ("prompt", params.prompt if params.prompt and params.prompt.strip() else None),
+                    ("watermark_info", params.watermark_info),
+                    ("external_task_id", params.external_task_id),
+                    ("callback_url", params.callback_url),
+                )
+                if value is not None
+            }
+        )
 
     def _map_motion_control_params(self, params: _MotionControlParams, model: str) -> Mapping[str, str]:
         resolution: Final = params.resolution
@@ -492,6 +665,28 @@ class KlingVideoConfig(BaseVideoConfig):
         litellm_params: GenericLiteLLMParams,
         headers: dict,
     ) -> tuple[dict, RequestFiles, str]:
+        if strip_kling_prefix(model).endswith("-avatar"):
+            return (
+                {  # mutable-ok: the HTTP video handler requires a JSON-serializable dict
+                    key: dict(value) if isinstance(value, Mapping) else value  # mutable-ok: nested vendor JSON body
+                    for key, value in self._map_avatar_params(
+                        _AvatarParams.model_validate(
+                            {  # mutable-ok: Pydantic input restores the mapped media slots
+                                **video_create_optional_request_params,
+                                "image_url": video_create_optional_request_params.get("image")
+                                or video_create_optional_request_params.get("image_url"),
+                                "audio_urls": video_create_optional_request_params.get("sound_file")
+                                or video_create_optional_request_params.get("audio_urls"),
+                                "prompt": prompt,
+                            }
+                        ),
+                        model,
+                    ).items()
+                    if key != "seconds"
+                },
+                (),
+                f"{api_base}/videos/{_AVATAR}",
+            )
         motion_model: Final = _motion_control_model_name(model)
         if motion_model is not None:
             return (
@@ -545,7 +740,9 @@ class KlingVideoConfig(BaseVideoConfig):
 
         status = KLING_TASK_STATUS_MAP.get(data.get("task_status", "submitted"), "queued")
         kind: Final = (
-            _MOTION_CONTROL
+            _AVATAR
+            if strip_kling_prefix(model).endswith("-avatar")
+            else _MOTION_CONTROL
             if _motion_control_model_name(model) is not None
             else _IMAGE_TO_VIDEO
             if request_data and request_data.get("image")
@@ -560,13 +757,13 @@ class KlingVideoConfig(BaseVideoConfig):
             if request_data.get("aspect_ratio") is not None:
                 size = str(request_data["aspect_ratio"]).replace(":", "x")
 
-        if kind == _MOTION_CONTROL:
-            # Motion control sends no duration to Kling (output length follows the driver
-            # clip), so the billed seconds survive only on the logged optional params.
+        if kind in (_MOTION_CONTROL, _AVATAR):
+            # These endpoints send no duration to Kling (output length follows the driver
+            # clip or voice track), so billed seconds survive only on the logged params.
             # Degrade rather than raise: the task is already submitted and paid for by
             # the time this runs, so a missing duration must cost COGS accuracy, not the
             # caller's generation.
-            seconds = _motion_control_billed_seconds(logging_obj)  # rebind-ok: motion duration is metadata only
+            seconds = _logged_billed_seconds(logging_obj)  # rebind-ok: billed duration is metadata only
 
         usage: dict[str, Any] = {}
         if seconds is not None:
@@ -681,9 +878,9 @@ class KlingVideoConfig(BaseVideoConfig):
         decoded = decode_video_id_with_provider(video_id)
         task_id = decoded.get("video_id") or extract_original_video_id(video_id)
         kind = decoded.get("model_id")
-        if kind not in (_TEXT_TO_VIDEO, _IMAGE_TO_VIDEO, _MOTION_CONTROL):
+        if kind not in (_TEXT_TO_VIDEO, _IMAGE_TO_VIDEO, _MOTION_CONTROL, _AVATAR):
             raise ValueError(
-                "Kling video status/content lookup requires the text2video/image2video/motion-control "
+                "Kling video status/content lookup requires the text2video/image2video/motion-control/avatar/image2video "
                 "kind encoded in the video_id. Use the id returned by video creation."
             )
         return task_id, kind
@@ -694,7 +891,7 @@ class KlingVideoConfig(BaseVideoConfig):
         if request is None:
             return None
         path = request.url.path
-        for kind in (_IMAGE_TO_VIDEO, _TEXT_TO_VIDEO, _MOTION_CONTROL):
+        for kind in (_AVATAR, _IMAGE_TO_VIDEO, _TEXT_TO_VIDEO, _MOTION_CONTROL):
             if f"/videos/{kind}/" in path or path.endswith(f"/videos/{kind}"):
                 return kind
         return None

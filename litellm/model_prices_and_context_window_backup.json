@@ -55948,6 +55948,39 @@
             "/v1/images/generations"
         ]
     },
+    "kling/kling-v2-6": {
+        "litellm_provider": "kling",
+        "mode": "video_generation",
+        "output_cost_per_second_720p": 0.042,
+        "output_cost_per_second_1080p": 0.07,
+        "output_cost_per_second": 0.042,
+        "source": "https://kling.ai/document-api/pricing/base/video",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "kling/kling-v2-5-turbo": {
+        "litellm_provider": "kling",
+        "mode": "video_generation",
+        "output_cost_per_second_720p": 0.042,
+        "output_cost_per_second_1080p": 0.07,
+        "output_cost_per_second": 0.042,
+        "source": "https://kling.ai/document-api/pricing/base/video",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
+    "kling/kling-avatar": {
+        "litellm_provider": "kling",
+        "mode": "video_generation",
+        "output_cost_per_second_720p": 0.056,
+        "output_cost_per_second_1080p": 0.112,
+        "output_cost_per_second": 0.056,
+        "source": "https://kling.ai/document-api/pricing/base/video",
+        "supported_endpoints": [
+            "/v1/videos"
+        ]
+    },
     "kling/kling-v3-motion-control": {
         "litellm_provider": "kling",
         "mode": "video_generation",
