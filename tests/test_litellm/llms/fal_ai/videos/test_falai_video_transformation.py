@@ -265,7 +265,8 @@ class TestFalAIVideoTransformation:
             )
 
     @pytest.mark.parametrize("app", ("hunyuan3d-v3/image-to-3d", "trellis", "hyper3d/rodin"))
-    def test_mesh_create_usage_is_one_generation(self, app: str) -> None:
+    @pytest.mark.parametrize("duration", (None, "5", "0", "0.5", "invalid"))
+    def test_mesh_create_usage_is_one_generation(self, app: str, duration: str | None) -> None:
         response: Final = _fal_result_response({"request_id": "mesh-id", "status": "IN_QUEUE"})
         mesh: Final = self.config.transform_video_create_response(
             model=f"fal_ai/fal-ai/{app}",
@@ -283,21 +284,40 @@ class TestFalAIVideoTransformation:
             model=f"fal_ai/fal-ai/{app}",
             raw_response=response,
             logging_obj=self.mock_logging_obj,
-            request_data={"duration": "5"},
+            request_data={"duration": duration} if duration is not None else None,
         )
-        assert explicit.usage["duration_seconds"] == 5.0
+        assert explicit.usage["duration_seconds"] == 1.0
+
+    @pytest.mark.parametrize("duration,expected", ((None, None), ("5", 5.0), ("0", 0.0), ("invalid", None)))
+    def test_video_create_usage_preserves_duration(self, duration: str | None, expected: float | None) -> None:
+        video: Final = self.config.transform_video_create_response(
+            model=SORA_2_MODEL,
+            raw_response=_fal_result_response({"request_id": "video-id", "status": "IN_QUEUE"}),
+            logging_obj=self.mock_logging_obj,
+            request_data={"duration": duration} if duration is not None else None,
+        )
+        assert video.usage.get("duration_seconds") == expected
 
     @pytest.mark.parametrize(
         "app,price", (("hunyuan3d-v3/image-to-3d", 0.375), ("trellis", 0.02), ("hyper3d/rodin", 0.40))
     )
-    def test_mesh_generation_cost(self, monkeypatch: pytest.MonkeyPatch, app: str, price: float) -> None:
+    @pytest.mark.parametrize("duration", (None, "5", "0", "0.5", "invalid"))
+    def test_mesh_generation_cost(
+        self, monkeypatch: pytest.MonkeyPatch, app: str, price: float, duration: str | None
+    ) -> None:
         from litellm.cost_calculator import default_video_cost_calculator
 
         monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
         monkeypatch.setattr(litellm, "model_cost", litellm.get_model_cost_map(url=""))
+        mesh: Final = self.config.transform_video_create_response(
+            model=f"fal_ai/fal-ai/{app}",
+            raw_response=_fal_result_response({"request_id": "mesh-id", "status": "IN_QUEUE"}),
+            logging_obj=self.mock_logging_obj,
+            request_data={"duration": duration} if duration is not None else None,
+        )
         cost: Final = default_video_cost_calculator(
             model=f"fal_ai/fal-ai/{app}",
-            duration_seconds=1.0,
+            duration_seconds=mesh.usage["duration_seconds"],
             custom_llm_provider="fal_ai",
         )
         assert cost == pytest.approx(price)

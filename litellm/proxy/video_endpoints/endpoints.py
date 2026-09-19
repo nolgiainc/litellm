@@ -806,6 +806,7 @@ async def video_content(
     request: Request,
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+    variant: str | None = None,
 ):
     """
     Video content endpoint for downloading video content.
@@ -834,7 +835,6 @@ async def video_content(
         version,
     )
 
-    variant: Final = request.query_params.get("variant")
     decoded: Final = decode_video_id_with_provider(video_id)
     provider_from_id: Final = decoded.get("custom_llm_provider")
     model_id_from_decoded: Final = decoded.get("model_id")

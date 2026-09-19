@@ -319,6 +319,7 @@ async def call_content(harness: Harness, video_id: str, *, headers=None, query=N
         request=FakeRequest(headers=headers, query=query),
         fastapi_response=Response(),
         user_api_key_dict=_user(),
+        variant=query.get("variant") if query else None,
     )
 
 
@@ -350,13 +351,39 @@ async def test_content__plain_id_has_no_openai_default(harness):
     assert harness.processor_data() == {"video_id": "video_plain"}
 
 
-@pytest.mark.asyncio
-async def test_content__forwards_thumbnail_variant(harness: Harness) -> None:
-    harness.base_process.return_value = b"thumbnail"
+@pytest.mark.parametrize("path", ("/v1/videos/{video_id}/content", "/videos/{video_id}/content"))
+def test_content__declares_variant_query_parameter(path: str) -> None:
+    from fastapi import FastAPI
 
-    await call_content(harness, "video_plain", query={"variant": "thumbnail"})
+    app: Final = FastAPI()
+    app.include_router(endpoints.router)
+    parameters: Final = app.openapi()["paths"][path]["get"]["parameters"]
+    variant: Final = next(parameter for parameter in parameters if parameter["name"] == "variant")
 
-    assert harness.processor_data() == {"video_id": "video_plain", "variant": "thumbnail"}
+    assert variant["in"] == "query"
+    assert variant["required"] is False
+    assert {"type": "string"} in variant["schema"]["anyOf"]
+
+
+@pytest.mark.parametrize("path", ("/v1/videos/video_plain/content", "/videos/video_plain/content"))
+@pytest.mark.parametrize("variant", (None, "thumbnail", "spritesheet"))
+def test_content__forwards_variant_over_http(harness: Harness, path: str, variant: str | None) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app: Final = FastAPI()
+    app.include_router(endpoints.router)
+    app.dependency_overrides[endpoints.user_api_key_auth] = _user
+    harness.base_process.return_value = b"content"
+
+    with TestClient(app) as client:
+        response: Final = client.get(path, params={"variant": variant} if variant is not None else {})
+
+    assert response.status_code == 200
+    assert response.content == b"content"
+    assert harness.processor_data() == (
+        {"video_id": "video_plain", "variant": variant} if variant is not None else {"video_id": "video_plain"}
+    )
 
 
 @pytest.mark.asyncio

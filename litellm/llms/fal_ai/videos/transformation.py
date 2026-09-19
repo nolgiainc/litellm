@@ -533,13 +533,13 @@ class FalAIVideoConfig(BaseVideoConfig):
             )
 
         usage: dict[str, Any] = {}
-        if video_obj.seconds:
+        if any(marker in model_id.lower() for marker in _MESH_MODEL_MARKERS):
+            usage["duration_seconds"] = 1.0
+        elif video_obj.seconds:
             try:
                 usage["duration_seconds"] = float(video_obj.seconds)
             except (ValueError, TypeError):
                 pass
-        elif any(marker in model_id.lower() for marker in _MESH_MODEL_MARKERS):
-            usage["duration_seconds"] = 1.0
         # Megapixel-priced apps (seedvr upscale) bill per output resolution, so the
         # requested tier has to reach cost tracking; a per-second rate alone would
         # charge a 4k restore at the 1080p price.
