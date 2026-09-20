@@ -1,4 +1,5 @@
 import time
+from typing import Final
 
 import jwt
 
@@ -46,5 +47,44 @@ def kling_auth_headers(api_key: str | None) -> dict:
     token = generate_kling_jwt(resolve_kling_api_key(api_key))
     return {
         "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def resolve_kling_console_api_key(api_key: str | None) -> str:
+    """
+    The console key for Kling's newer PATH-BASED surface.
+
+    Deliberately does NOT fall back to `litellm.api_key` the way
+    resolve_kling_api_key() does. The two Kling credentials are different
+    shapes serving different surfaces - an `AccessKey:SecretKey` pair that the
+    classic /v1 routes sign short-lived JWTs with, against a single opaque
+    `api-` token the path-based routes take as a plain bearer - and the generic
+    fallback would happily hand the AK/SK pair to the path surface, which
+    answers it with `401 code 1002` pointing at the console. A named env var or
+    an explicit api_key, and nothing else.
+    """
+    resolved: Final = api_key or get_secret_str("KLING_CONSOLE_API_KEY")
+    if not resolved:
+        raise ValueError(
+            "Kling console API key is required for the path-based Kling models "
+            "(3.0 Turbo, 3.0 Omni, O1). Set KLING_CONSOLE_API_KEY (a single token minted at "
+            "https://kling.ai/dev/api-key) or pass the api_key parameter. The classic "
+            "KLING_API_KEY AccessKey:SecretKey pair is rejected by this surface."
+        )
+    if ":" in resolved:
+        raise ValueError(
+            "KLING_CONSOLE_API_KEY looks like an 'AccessKey:SecretKey' pair. The path-based Kling "
+            "surface rejects AK/SK credentials (401 code 1002); mint a console key at "
+            "https://kling.ai/dev/api-key."
+        )
+    return resolved
+
+
+def kling_console_auth_headers(
+    api_key: str | None,
+) -> dict:  # mutable-ok: validate_environment merges into a mutable header dict
+    return {  # mutable-ok: see the return annotation
+        "Authorization": f"Bearer {resolve_kling_console_api_key(api_key)}",
         "Content-Type": "application/json",
     }

@@ -9192,9 +9192,11 @@ class ProviderConfigManager:
 
             return FalAIVideoConfig()
         elif LlmProviders.KLING == provider:
-            from litellm.llms.kling.videos.transformation import KlingVideoConfig
+            # Two surfaces, two transforms: 3.0 Turbo / 3.0 Omni / O1 are
+            # path-based and the rest are the classic /v1 task API (NOL-1041).
+            from litellm.llms.kling.videos import get_kling_video_config
 
-            return KlingVideoConfig()
+            return get_kling_video_config(model)
         elif LlmProviders.XAI == provider:
             from litellm.llms.xai.videos.transformation import XAIVideoConfig
 
