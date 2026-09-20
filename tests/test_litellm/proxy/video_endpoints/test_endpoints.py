@@ -390,6 +390,19 @@ def test_content__forwards_variant_over_http(harness: Harness, path: str, varian
 @pytest.mark.parametrize(
     ("content", "media_type", "extension"),
     (
+        (b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm", "video/webm", "webm"),
+        (
+            b"\x1a\x45\xdf\xa3\x40\x10\x42\x86\x81\x01\x42\x82\x40\x04webm\x42\x87\x81\x04",
+            "video/webm",
+            "webm",
+        ),
+        (
+            b"\x1a\x45\xdf\xa3\x01\x00\x00\x00\x00\x00\x00\x07\x42\x82\x84webm",
+            "video/webm",
+            "webm",
+        ),
+        (b"\x00\x00\x00\x18ftypmp42", "video/mp4", "mp4"),
+        (b"\x1a\x45\xdf", "video/mp4", "mp4"),
         (b"glTF\x02\x00\x00\x00", "model/gltf-binary", "glb"),
         (b"\x89PNG\r\n\x1a\nimage", "image/png", "png"),
         (b"\xff\xd8\xffimage", "image/jpeg", "jpg"),
@@ -403,7 +416,67 @@ async def test_content__sniffs_media_bytes(harness: Harness, content: bytes, med
 
     assert response.body == content
     assert response.media_type == media_type
+    assert response.headers["content-type"] == media_type
     assert response.headers["content-disposition"] == f"attachment; filename=video_video_plain.{extension}"
+
+
+@pytest.mark.parametrize("length", range(12))
+def test_content__truncated_webm_header_falls_back(length: int) -> None:
+    content: Final = b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm"[:length]
+
+    assert endpoints._video_content_media_type(content) == ("video/mp4", "mp4")
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        pytest.param(b"\x1a\x45\xdf\xa3\x8b\x42\x82\x88matroska", id="matroska"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x87\x42\x82\x84nope", id="unknown-doctype"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x80\x42\x82\x84webm", id="doctype-outside-header"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x89\xec\x87\x42\x82\x84webm", id="doctype-inside-void"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x86\x42\x82\x84webm", id="doctype-exceeds-header"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x00", id="invalid-header-size"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x40", id="truncated-header-size"),
+        pytest.param(b"\x1a\x45\xdf\xa3\xff\x42\x82\x84webm", id="unknown-header-size"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x83\x42\x82\xff", id="unknown-element-size"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x83\x42\x82\x00", id="invalid-element-size"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x83\x42\x82\x40", id="truncated-element-size"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x81\x42", id="truncated-element-id"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x81\x00", id="invalid-element-id"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x82\xff\x80", id="reserved-element-id"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x8e" + b"\x42\x82\x84webm" * 2, id="duplicate-doctype"),
+        pytest.param(b"\x1a\x45\xdf\xa3\x88\x42\x82\x84webm\x00", id="malformed-after-doctype"),
+        pytest.param(
+            b"\x1a\x45\xdf\xa3\x50\x00\x42\x82\x84webm" + b"\x00" * 4089,
+            id="header-exceeds-sniff-limit",
+        ),
+        pytest.param(
+            b"\x1a\x45\xdf\xa3\x40\x87" + b"\xec\x80" * 64 + b"\x42\x82\x84webm",
+            id="too-many-header-elements",
+        ),
+    ),
+)
+def test_content__non_webm_or_malformed_ebml_falls_back(content: bytes) -> None:
+    assert endpoints._video_content_media_type(content) == ("video/mp4", "mp4")
+
+
+@pytest.mark.parametrize("doctype_first", (False, True))
+def test_content__webm_at_header_element_limit(doctype_first: bool) -> None:
+    padding: Final = b"\xec\x80" * 63
+    doctype: Final = b"\x42\x82\x84webm"
+    content: Final = b"\x1a\x45\xdf\xa3\x40\x85" + (
+        doctype + padding if doctype_first else padding + doctype
+    )
+
+    assert endpoints._video_content_media_type(content) == ("video/webm", "webm")
+
+
+def test_content__webm_bytearray() -> None:
+    content: Final = bytearray(  # mutable-ok: exercise the helper's existing bytearray input contract
+        b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm"
+    )
+
+    assert endpoints._video_content_media_type(content) == ("video/webm", "webm")
 
 
 @pytest.mark.asyncio

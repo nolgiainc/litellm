@@ -345,3 +345,19 @@ def test_gemini_3_8_flash_entries_match_across_price_maps():
         assert entry["supports_minimal_reasoning_effort"] is False
         assert entry["supported_output_modalities"] == ["text"]
         assert "2027-01-01" in entry["metadata"]["notes"], "the 2027 rate step-up must stay documented on the entry"
+
+
+@pytest.mark.parametrize(
+    "model,cost_key,rate",
+    [
+        ("fal_ai/fal-ai/bria/background/remove", "output_cost_per_image", 0.018),
+        ("fal_ai/bria/video/background-removal/v3", "output_cost_per_second", 0.05),
+    ],
+)
+def test_background_removal_rates_match_across_price_maps(model, cost_key, rate):
+    texts = [(REPO_ROOT / path).read_text() for path in PRICE_MAPS]
+    entries = [json.loads(text)[model] for text in texts]
+    assert entries[0] == entries[1]
+    assert entries[0][cost_key] == rate
+    blocks = [text.split(f'    "{model}": {{', 1)[1].split('\n    },', 1)[0] for text in texts]
+    assert blocks[0] == blocks[1]

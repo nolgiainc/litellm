@@ -4201,7 +4201,9 @@ class Router:
 
         return await self.async_function_with_fallbacks(**kwargs)
 
-    def image_generation(self, prompt: str, model: str, **kwargs):
+    def image_generation(self, prompt: str | None = None, model: str | None = None, **kwargs):
+        if model is None:
+            raise TypeError("image_generation() missing required argument: 'model'")
         try:
             kwargs["model"] = model
             kwargs["prompt"] = prompt
@@ -4213,7 +4215,7 @@ class Router:
         except Exception as e:
             raise e
 
-    def _image_generation(self, prompt: str, model: str, **kwargs):
+    def _image_generation(self, prompt: str | None, model: str, **kwargs):
         model_name: Final = ""
         try:
             verbose_router_logger.debug("Inside _image_generation()- model: %s; kwargs: %s", model, kwargs)
@@ -4253,7 +4255,9 @@ class Router:
                 self.fail_calls[model_name] += 1
             raise e
 
-    async def aimage_generation(self, prompt: str, model: str, **kwargs):
+    async def aimage_generation(self, prompt: str | None = None, model: str | None = None, **kwargs):
+        if model is None:
+            raise TypeError("aimage_generation() missing required argument: 'model'")
         try:
             kwargs["model"] = model
             kwargs["prompt"] = prompt
@@ -4273,7 +4277,7 @@ class Router:
             )
             raise e
 
-    async def _aimage_generation(self, prompt: str, model: str, **kwargs):
+    async def _aimage_generation(self, prompt: str | None, model: str, **kwargs):
         model_name = model
         try:
             verbose_router_logger.debug("Inside _image_generation()- model: %s; kwargs: %s", model, kwargs)
