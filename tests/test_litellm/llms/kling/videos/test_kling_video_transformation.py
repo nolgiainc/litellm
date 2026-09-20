@@ -1016,6 +1016,29 @@ class TestKlingCatalogConstraints:
         }
         assert url == f"{API_BASE}/videos/{'image2video' if image else 'text2video'}"
 
+    @pytest.mark.parametrize("model", ("kling/kling-v2-6", "kling/kling-v2-5-turbo", "kling/kling-v3"))
+    @pytest.mark.parametrize("image", (None, "https://img/start.png"))
+    def test_callback_url_is_forwarded_top_level(self, model: str, image: str | None) -> None:
+        """A caller's callback_url reaches the classic body top level on every catalog route (NOL-1042).
+
+        nolgia-api sends it as a top-level request param, which the proxy hands to
+        map_openai_params unchanged; the classic surface takes it beside model_name.
+        """
+        callback: Final = "https://api.nolgia.ai/v1/callbacks/kling?token=v1.abc.def"
+        config: Final = KlingVideoConfig()
+        mapped: Final = config.map_openai_params(
+            {"seconds": 5, "input_reference": image, "callback_url": callback},
+            model,
+            False,
+        )
+        data, _, url = config.transform_video_create_request(
+            model, "a cat", API_BASE, mapped, GenericLiteLLMParams(), {}
+        )
+        assert data["callback_url"] == callback
+        assert data["model_name"] == model.removeprefix("kling/")
+        assert data["prompt"] == "a cat"
+        assert url == f"{API_BASE}/videos/{'image2video' if image else 'text2video'}"
+
     @pytest.mark.parametrize("model", ("kling-v2-6", "kling-v2-5-turbo"))
     @pytest.mark.parametrize("mode,error", (("4k", "publishes no 4K tier"), ("zzz", "does not support mode")))
     def test_rejects_mode(self, model: str, mode: str, error: str) -> None:
