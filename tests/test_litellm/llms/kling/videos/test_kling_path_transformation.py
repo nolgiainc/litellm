@@ -161,6 +161,30 @@ class TestPathRequests:
         with_options, _, _ = self._build("kling/kling-o1", seconds=5, external_task_id="abc")
         assert with_options["options"] == {"external_task_id": "abc"}
 
+    @pytest.mark.parametrize(
+        ("model", "image"),
+        [
+            ("kling/kling-3.0-turbo", None),
+            ("kling/kling-3.0-turbo", "https://x.test/a.jpg"),
+            ("kling/kling-3.0-omni", None),
+            ("kling/kling-3.0-omni-audio", None),
+            ("kling/kling-o1", None),
+        ],
+    )
+    def test_callback_url_rides_options_on_every_path_endpoint(self, model, image):
+        """A caller's callback_url reaches the vendor under options, never settings (NOL-1042).
+
+        nolgia-api sends it as a top-level request param, exactly as external_task_id
+        travels; the path surface accepts it on every endpoint (measured NOL-1041).
+        """
+        callback: Final = "https://api.nolgia.ai/v1/callbacks/kling?token=v1.abc.def"
+        body, _, _ = self._build(
+            model, seconds=5, callback_url=callback, **({"input_reference": image} if image else {})
+        )
+        assert body["options"] == {"callback_url": callback}
+        assert "callback_url" not in body["settings"]
+        assert "callback_url" not in body
+
     def test_default_duration_and_resolution_are_the_cheapest_priced_rungs(self):
         body, _, _ = self._build("kling/kling-o1")
         assert body["settings"]["duration"] == 5
