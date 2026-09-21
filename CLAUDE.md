@@ -172,6 +172,13 @@ Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, sim
 - Routing decides capability, not the vendor: `kling-v3-*-i2v` is served
   by the DIRECT kling provider (no end-frame field; Kling calls it
   `image_tail`) while `kling-v3-*-i2v-fal` accepts `end_image_url`, and
-  `seedance-v2-pro-r2v` is OpenRouter (no reference-audio or bitrate slot)
-  with a fal twin that has both. Check `litellm-config.yaml` before
-  assuming a model's surface.
+  `seedance-v2-pro-r2v` is SeeGen (NOL-824 repointed it off OpenRouter on
+  2026-09-14) and its fal twin `seedance-v2-pro-r2v-fal` is still a live
+  primary route. Note what the twin is NOT: it is not a capability
+  fallback. `seegen/videos/seedance.py` emits `content[].role` of
+  `reference_video` and `reference_audio` for the whole Seedance family
+  with no per-model gate, so the SeeGen route serves reference video and
+  audio too. nolgia-api dispatches to the twin on input type - reference
+  VIDEO, held on fal for its measured flat cross-tier rate, and frames
+  mixed with element images, which SeeGen refuses outright (NOL-897,
+  NOL-1100). Check `litellm-config.yaml` before assuming a model's surface.
