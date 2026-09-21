@@ -2869,7 +2869,21 @@ def test_gemini_embedding_2_ga_in_cost_map():
             ), f"{key} must have uses_embed_content=true for correct Vertex AI routing"
 
 
-def test_gemini_lyria_3_preview_models_in_cost_map():
+def test_gemini_lyria_models_price_per_song_on_the_speech_path():
+    """Lyria bills a flat price PER SONG, and must price on /v1/audio/speech.
+
+    NOL-1099. These rows used to be `mode: chat` carrying
+    `input_cost_per_token: 0` / `output_cost_per_token: 0`, with the clip's
+    real price parked in `output_cost_per_image` — a key the speech cost path
+    never reads. A per-token price of zero on a per-song product does not
+    under-bill, it meters NOTHING, so every Lyria generation logged $0.00.
+
+    The assertions below are the three things that have to hold for the money
+    to be right: the mode selects the speech path, the flat per-song key is
+    the one carrying the rate (it is read before any per-token metric), and
+    no stale per-token key survives — `select_cost_metric_for_model` reads
+    those, and a zero there wins over having no per-song price at all.
+    """
     import json
     from pathlib import Path
 
@@ -2877,12 +2891,21 @@ def test_gemini_lyria_3_preview_models_in_cost_map():
     with open(json_path) as f:
         model_cost = json.load(f)
 
-    clip = model_cost.get("gemini/lyria-3-clip-preview")
-    pro = model_cost.get("gemini/lyria-3-pro-preview")
-    assert clip is not None and pro is not None
-    assert clip["litellm_provider"] == "gemini" and pro["litellm_provider"] == "gemini"
-    assert clip["max_input_tokens"] == 131072 == pro["max_input_tokens"]
-    assert clip["output_cost_per_image"] == 0.04
+    expected_price = {
+        "gemini/lyria-3.5": 0.08,
+        "gemini/lyria-3-pro-preview": 0.08,
+        "gemini/lyria-3-clip-preview": 0.04,
+    }
+
+    for key, price in expected_price.items():
+        info = model_cost.get(key)
+        assert info is not None, f"{key} not found in model_prices_and_context_window.json"
+        assert info["litellm_provider"] == "gemini"
+        assert info["mode"] == "audio_speech", f"{key} must price on the speech path"
+        assert info["output_cost_per_audio"] == price, key
+        assert "input_cost_per_token" not in info, f"{key} still carries a per-token price"
+        assert "output_cost_per_token" not in info, f"{key} still carries a per-token price"
+        assert "output_cost_per_image" not in info, f"{key} still prices audio as an image"
 
 
 def test_model_info_for_fireworks_short_form_models():

@@ -24,6 +24,57 @@ GEMINI_TTS_CHAT_AUDIO_FORMAT: Final = "pcm16"
 GEMINI_TTS_RAW_RESPONSE_FORMAT: Final = "pcm"
 GEMINI_TTS_SUPPORTED_RESPONSE_FORMATS: Final = frozenset({"wav", GEMINI_TTS_RAW_RESPONSE_FORMAT})
 
+# The Content-Type used when the bytes match no container we recognise. It is
+# what this bridge returned unconditionally before NOL-1099, so an unknown
+# container degrades to the old behaviour rather than to an error.
+DEFAULT_AUDIO_CONTENT_TYPE: Final = "audio/mpeg"
+
+
+def _sniff_audio_content_type(audio: bytes) -> str:
+    """The container ``audio`` actually is, from its own header bytes.
+
+    WHY SNIFF RATHER THAN TRUST THE PROVIDER'S DECLARED TYPE (NOL-1099). This
+    bridge used to answer ``audio/mpeg`` for every non-Gemini-TTS model,
+    because the only provider reaching it returned MP3. Gemini's declared
+    ``inlineData.mimeType`` never survives the trip: the chat transform
+    (``VertexGeminiConfig._extract_audio_response_from_parts``) drops it when
+    it builds ``ChatCompletionAudioResponse``, which has no field to carry it,
+    and that object is the OpenAI-shaped type the chat completions API already
+    returns to callers — widening it to carry a mime type would change a public
+    response shape to fix a private one.
+
+    The bytes, however, are right here and cannot disagree with themselves. So
+    the container is read off the header, which is both simpler and strictly
+    more trustworthy than a declared type: it stays correct if a provider
+    mislabels its own output, and it needs no per-provider plumbing.
+
+    THIS MATTERS BECAUSE THE CALLER BELIEVES US. nolgia-api takes the
+    Content-Type from this response and uses it for the stored object's type
+    AND for the file extension. A wrong header there does not fail — it ships
+    a playable-looking file that no player can open, after the customer has
+    been billed. Lyria happens to return MP3, so the old hardcode was correct
+    by luck; this removes the luck.
+    """
+    if audio[:3] == b"ID3":
+        return "audio/mpeg"
+    if audio[:4] == b"RIFF" and audio[8:12] == b"WAVE":
+        return "audio/wav"
+    if audio[:4] == b"OggS":
+        return "audio/ogg"
+    if audio[:4] == b"fLaC":
+        return "audio/flac"
+    # ISO-BMFF (m4a/mp4 audio): the brand box starts at offset 4.
+    if audio[4:8] == b"ftyp":
+        return "audio/mp4"
+    if len(audio) >= 2 and audio[0] == 0xFF:
+        # AAC ADTS is 0xFFF1/0xFFF9 and must be tested BEFORE the generic MPEG
+        # frame sync below, whose 0xFFE0 mask also matches it.
+        if audio[1] in (0xF1, 0xF9):
+            return "audio/aac"
+        if audio[1] & 0xE0 == 0xE0:
+            return "audio/mpeg"
+    return DEFAULT_AUDIO_CONTENT_TYPE
+
 
 class ChatAudioParam(TypedDict):
     voice: ReadOnly[str]
@@ -172,7 +223,7 @@ class SpeechToCompletionBridgeTransformationHandler:
         content, content_type = (
             self._gemini_tts_response_body(decoded_audio, response_format)
             if self._is_gemini_tts_model(model)
-            else (decoded_audio, "audio/mpeg")
+            else (decoded_audio, _sniff_audio_content_type(decoded_audio))
         )
         response: Final = httpx.Response(
             status_code=200, content=content, headers=MappingProxyType({"Content-Type": content_type})

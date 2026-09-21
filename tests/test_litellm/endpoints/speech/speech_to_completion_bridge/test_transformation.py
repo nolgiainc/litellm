@@ -8,6 +8,7 @@ import litellm
 from litellm.constants import OPENAI_CHAT_COMPLETION_PARAMS
 from litellm.endpoints.speech.speech_to_completion_bridge.transformation import (
     SpeechToCompletionBridgeTransformationHandler,
+    _sniff_audio_content_type,
 )
 from litellm.types.utils import ChatCompletionAudioResponse, Choices, Message, ModelResponse
 
@@ -115,3 +116,135 @@ def test_non_gemini_response_keeps_original_bytes_and_mpeg_content_type() -> Non
 
     assert response.response.content == PCM_BYTES
     assert response.response.headers["content-type"] == "audio/mpeg"
+
+
+# --- NOL-1099: the container a non-TTS Gemini model actually returned --------
+#
+# The bridge answered "audio/mpeg" for every non-Gemini-TTS model because the
+# only provider reaching it returned MP3. Lyria (Google's music model, moved
+# off the fal reseller onto our own Gemini key) is the first that does not
+# have "tts" in its name, and nolgia-api derives both the stored content type
+# and the FILE EXTENSION from this header — so a wrong answer here ships a
+# file no player can open, after the customer has been billed.
+
+LYRIA_MODEL: Final = "gemini/lyria-3.5"
+
+# Real header bytes. The MP3 case is what production Lyria actually returns:
+# a `generateContent` call from our egress on 2026-09-21 came back with
+# inlineData.mimeType "audio/mpeg" and bytes beginning "ID3" (ffprobe: mp3,
+# 44100 Hz, stereo, 192 kbps, 175.4 s).
+_ID3_MP3: Final = b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x00" * 16
+_SYNC_MP3: Final = b"\xff\xfb\x90\x00" + b"\x00" * 16
+_WAV: Final = b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 16
+_OGG: Final = b"OggS\x00\x02" + b"\x00" * 20
+_FLAC: Final = b"fLaC\x00\x00\x00\x22" + b"\x00" * 16
+_M4A: Final = b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 16
+_AAC: Final = b"\xff\xf1\x50\x80" + b"\x00" * 16
+_UNKNOWN: Final = b"\x01\x02\x03\x04" * 6
+
+
+@pytest.mark.parametrize(
+    ("audio_bytes", "expected_content_type"),
+    [
+        (_ID3_MP3, "audio/mpeg"),
+        (_SYNC_MP3, "audio/mpeg"),
+        (_WAV, "audio/wav"),
+        (_OGG, "audio/ogg"),
+        (_FLAC, "audio/flac"),
+        (_M4A, "audio/mp4"),
+        (_AAC, "audio/aac"),
+    ],
+)
+def test_non_tts_gemini_response_reports_the_container_it_actually_is(
+    audio_bytes: bytes, expected_content_type: str
+) -> None:
+    response: Final = SpeechToCompletionBridgeTransformationHandler().transform_response(
+        model_response=_model_response(LYRIA_MODEL, audio_bytes), response_format=None
+    )
+
+    assert response.response.headers["Content-Type"] == expected_content_type
+    # The bytes are passed through untouched — only the label is corrected.
+    assert response.response.content == audio_bytes
+
+
+def test_unrecognised_container_keeps_the_previous_default() -> None:
+    """An unknown header degrades to the old hardcode, never to an error.
+
+    A model whose container we cannot name is still a generation the customer
+    has paid for; refusing it would turn a labelling gap into a failed request.
+    """
+    response: Final = SpeechToCompletionBridgeTransformationHandler().transform_response(
+        model_response=_model_response(LYRIA_MODEL, _UNKNOWN), response_format=None
+    )
+
+    assert response.response.headers["Content-Type"] == "audio/mpeg"
+    assert response.response.content == _UNKNOWN
+
+
+def test_aac_is_not_mistaken_for_mpeg() -> None:
+    """ADTS AAC starts 0xFFF1/0xFFF9, which the 0xFFE0 MPEG frame-sync mask
+    also matches. Order of the checks is the whole test."""
+    assert _sniff_audio_content_type(_AAC) == "audio/aac"
+    assert _sniff_audio_content_type(_SYNC_MP3) == "audio/mpeg"
+
+
+def test_gemini_tts_path_is_unchanged_by_the_sniff() -> None:
+    """Gemini TTS returns raw PCM with no header to sniff, and keeps its own
+    PCM->WAV wrapping. This pins that NOL-1099 did not touch it."""
+    response: Final = SpeechToCompletionBridgeTransformationHandler().transform_response(
+        model_response=_model_response(GEMINI_TTS_MODEL, PCM_BYTES), response_format=None
+    )
+
+    assert response.response.headers["Content-Type"] == "audio/wav"
+    assert response.response.content.startswith(b"RIFF")
+
+
+def test_lyria_prices_as_a_flat_per_song_audio_generation() -> None:
+    """NOL-1099: Lyria bills $0.08 per song, not per token.
+
+    The route cannot be priced from litellm-config: `output_cost_per_audio` is
+    in CustomPricingLiteLLMParams, so `shared_backend_model_info` strips it
+    from the shared `{provider}/{model}` key that the speech cost path reads,
+    and a deployment-level pin is inert. The BUNDLED PRICE MAP is the fix, and
+    is what this pins — deliberately reading the vendored file rather than
+    whatever `litellm.model_cost` happens to hold, because the proxy runs with
+    `LITELLM_LOCAL_MODEL_COST_MAP=True` and that file is its only price source.
+    Without these rows the route logs $0.00 — the NOL-535/559 class.
+    """
+    import json
+    from pathlib import Path as _Path
+
+    from litellm.cost_calculator import cost_per_token
+
+    bundled: Final = json.loads(
+        (_Path(litellm.__file__).parent / "model_prices_and_context_window_backup.json").read_text()
+    )
+
+    expected: Final = {
+        "gemini/lyria-3.5": 0.08,
+        "gemini/lyria-3-pro-preview": 0.08,
+        "gemini/lyria-3-clip-preview": 0.04,
+    }
+
+    for model, price in expected.items():
+        row = bundled.get(model)
+        assert row is not None, f"{model} is missing from the bundled price map"
+        assert row["mode"] == "audio_speech", f"{model} must price on the /v1/audio/speech path"
+        assert row["output_cost_per_audio"] == price, model
+        # Stale per-token keys are what made this meter $0: select_cost_metric_for_model
+        # reads them, and a zero there wins over having no per-song price at all.
+        assert "input_cost_per_token" not in row, f"{model} still carries a per-token price"
+        assert "output_cost_per_token" not in row, f"{model} still carries a per-token price"
+
+    litellm.register_model(model_cost={model: bundled[model] for model in expected})
+
+    for model, price in expected.items():
+        prompt_cost, completion_cost = cost_per_token(
+            model=model,
+            custom_llm_provider="gemini",
+            call_type="aspeech",
+            prompt_tokens=21,
+            completion_tokens=719,
+            prompt_characters=83,
+        )
+        assert prompt_cost + completion_cost == pytest.approx(price), model
