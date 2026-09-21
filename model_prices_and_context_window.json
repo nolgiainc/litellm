@@ -21085,7 +21085,7 @@
     "fal_ai/fal-ai/elevenlabs/music": {
         "litellm_provider": "fal_ai",
         "mode": "audio_speech",
-        "output_cost_per_second": 0.013333,
+        "output_cost_per_second": 0.01,
         "supported_endpoints": [
             "/v1/audio/speech"
         ],

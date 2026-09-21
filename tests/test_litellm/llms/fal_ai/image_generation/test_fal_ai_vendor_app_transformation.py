@@ -379,3 +379,18 @@ class TestPricing:
     def test_qwen_2k_uses_upper_tier(self, model):
         response = ImageResponse(data=[ImageObject(url="https://x/1.png")])
         assert cost_calculator(model, response, {"image_size": "auto_2K"}) == pytest.approx(0.075)
+
+    @pytest.mark.parametrize(
+        "model,params,expected",
+        [
+            (IDEOGRAM_T2I, {"rendering_speed": "QUALITY", "image_size": {"width": 2048, "height": 1024}}, 0.0524288),
+            (IDEOGRAM_I2I, {"rendering_speed": "TURBO"}, 0.0075),
+            (SEEDREAM_T2I, {"image_size": "auto_2K"}, 0.135),
+            (QWEN_T2I, {"image_size": "auto_2K"}, 0.075),
+            (SEEDREAM_EDIT, {"image_urls": ["https://x/a.png", "https://x/b.png"]}, 0.0675 + 0.0045),
+        ],
+    )
+    def test_provider_prefixed_model_prices_the_same_as_the_bare_app_id(self, model, params, expected):
+        """The proxy cost path passes fal_ai/<app id>, which must not drop a vendor out of its tier table (NOL-1098)."""
+        response = ImageResponse(data=[ImageObject(url="https://x/1.png")])
+        assert cost_calculator(f"fal_ai/{model}", response, params) == pytest.approx(expected)
