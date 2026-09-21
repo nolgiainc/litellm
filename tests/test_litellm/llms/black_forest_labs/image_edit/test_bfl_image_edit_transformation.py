@@ -216,6 +216,106 @@ class TestBlackForestLabsImageEditTransformation:
         decoded_mask = base64.b64decode(data["mask"])
         assert decoded_mask == mask_data
 
+    def test_expand_sends_image_not_input_image(self):
+        """flux-pro-1.0-expand 422s on `input_image`; the body must key the source as `image` (NOL-1097)."""
+        image_data = b"fake_image_data"
+
+        data, _files = self.config.transform_image_edit_request(
+            model="flux-pro-1.0-expand",
+            prompt=self.prompt,
+            image=BytesIO(image_data),
+            image_edit_optional_request_params={},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert base64.b64decode(data["image"]) == image_data
+        assert "input_image" not in data
+
+    def test_expand_sends_image_when_provider_prefixed(self):
+        """The router may address the deployment as black_forest_labs/flux-pro-1.0-expand."""
+        data, _files = self.config.transform_image_edit_request(
+            model="black_forest_labs/flux-pro-1.0-expand",
+            prompt=self.prompt,
+            image=BytesIO(b"fake_image_data"),
+            image_edit_optional_request_params={},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert "image" in data
+        assert "input_image" not in data
+
+    def test_fill_sends_image_alongside_mask(self):
+        """flux-pro-1.0-fill takes the same `image` + `mask` shape as expand."""
+        image_data = b"fake_image_data"
+        mask_data = b"fake_mask_data"
+
+        data, _files = self.config.transform_image_edit_request(
+            model="flux-pro-1.0-fill",
+            prompt=self.prompt,
+            image=BytesIO(image_data),
+            image_edit_optional_request_params={"mask": BytesIO(mask_data)},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert base64.b64decode(data["image"]) == image_data
+        assert base64.b64decode(data["mask"]) == mask_data
+        assert "input_image" not in data
+
+    @pytest.mark.parametrize(
+        "model",
+        ["flux-kontext-pro", "flux-kontext-max", "flux-2-pro", "black_forest_labs/flux-kontext-pro"],
+    )
+    def test_non_expand_models_keep_input_image(self, model):
+        """Only expand and fill were renamed; every other edit endpoint stays on `input_image`."""
+        image_data = b"fake_image_data"
+
+        data, _files = self.config.transform_image_edit_request(
+            model=model,
+            prompt=self.prompt,
+            image=BytesIO(image_data),
+            image_edit_optional_request_params={},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert base64.b64decode(data["input_image"]) == image_data
+        assert "image" not in data
+
+    def test_expand_margins_reach_the_request_body(self):
+        """top/bottom/left/right are the whole point of the expand endpoint and must survive the transform."""
+        margins = {"top": 0, "bottom": 0, "left": 128, "right": 128}
+
+        data, _files = self.config.transform_image_edit_request(
+            model="flux-pro-1.0-expand",
+            prompt=self.prompt,
+            image=BytesIO(b"fake_image_data"),
+            image_edit_optional_request_params=dict(margins),
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert {key: data[key] for key in margins} == margins
+
+    def test_expand_margins_pass_through_map_openai_params(self):
+        """A multipart /v1/images/edits upload delivers the margins as strings, which BFL accepts as-is."""
+        optional_params: ImageEditOptionalRequestParams = {
+            "top": "0",
+            "bottom": "0",
+            "left": "128",
+            "right": "128",
+        }
+
+        result = self.config.map_openai_params(
+            image_edit_optional_params=optional_params,
+            model="flux-pro-1.0-expand",
+            drop_params=False,
+        )
+
+        assert {key: result[key] for key in ("top", "bottom", "left", "right")} == optional_params
+
     def test_read_image_bytes_from_bytes(self):
         """Test reading image bytes from bytes input."""
         image_data = b"test_image_bytes"

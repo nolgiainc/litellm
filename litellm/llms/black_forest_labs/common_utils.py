@@ -102,6 +102,34 @@ IMAGE_EDIT_MODELS: Final[dict[str, str]] = {
     "flux-2-klein-4b": "/v1/flux-2-klein-4b",
 }
 
+# The source-image field is named per ENDPOINT, and the mismatch is fatal rather
+# than silently ignored: /v1/flux-pro-1.0-expand answers an `input_image` body
+# with HTTP 422 {"type":"missing","loc":["body","image"]}, which failed every
+# flux-expand job (NOL-1097). Verified live 2026-09-21: expand takes `image`,
+# kontext takes EITHER, so this is a per-model override and not a rename to
+# apply provider-wide. flux-pro-1.0-fill publishes the same `image` + `mask`
+# shape and shares this transformation, so it is listed too even though no
+# Nolgia route reaches it yet. Everything else keeps `input_image`.
+DEFAULT_IMAGE_EDIT_IMAGE_FIELD: Final = "input_image"
+IMAGE_EDIT_IMAGE_FIELD_OVERRIDES: Mapping[str, str] = MappingProxyType(
+    {  # mutable-ok: frozen constant lookup table
+        "flux-pro-1.0-expand": "image",
+        "flux-pro-1.0-fill": "image",
+    }
+)
+
+
+def normalize_bfl_model_name(model: str) -> str:
+    """Reduce a routed model id such as ``black_forest_labs/flux-kontext-pro`` to the bare BFL model name."""
+    model_name: Final = model.lower()
+    return model_name.split("/")[-1] if "/" in model_name else model_name
+
+
+def image_edit_image_field(model: str) -> str:
+    """Name of the JSON field carrying the source image for a BFL image-edit model."""
+    return IMAGE_EDIT_IMAGE_FIELD_OVERRIDES.get(normalize_bfl_model_name(model), DEFAULT_IMAGE_EDIT_IMAGE_FIELD)
+
+
 # Model to endpoint mapping for video generation
 FLUX_3_VIDEO_ENDPOINT = "/v1/flux-3-video"
 VIDEO_GENERATION_MODELS: Mapping[str, str] = MappingProxyType(

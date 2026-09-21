@@ -152,8 +152,14 @@ def cost_calculator(
         return 0.0
     output_cost_per_pixel: float = entry.get("output_cost_per_pixel") or 0.0
     params = optional_params or {}  # mutable-ok: empty fallback is read-only
-    output_cost_per_image = _vendor_image_rate(model, params, entry.get("output_cost_per_image") or 0.0)
+    # The tier tables below key on the BARE fal app id. Passing the prefixed
+    # `model` matched Seedream and Qwen on a substring but never matched
+    # ideogram/v4, whose branch is a startswith, so every Ideogram v4 render
+    # fell through to the flat default-tier pin instead of being priced per
+    # megapixel (NOL-1098: recorded $0.015 flat against a real $0.05 on a 2 MP
+    # QUALITY render).
+    output_cost_per_image = _vendor_image_rate(bare_model, params, entry.get("output_cost_per_image") or 0.0)
     output_cost = sum(
         _image_cost(image, output_cost_per_pixel, output_cost_per_image) for image in (image_response.data or ())
     )
-    return output_cost + _seedream_input_surcharge(model, params)
+    return output_cost + _seedream_input_surcharge(bare_model, params)

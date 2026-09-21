@@ -27,6 +27,8 @@ from ..common_utils import (
     DEFAULT_API_BASE,
     IMAGE_EDIT_MODELS,
     BlackForestLabsError,
+    image_edit_image_field,
+    normalize_bfl_model_name,
 )
 
 if TYPE_CHECKING:
@@ -160,9 +162,7 @@ class BlackForestLabsImageEditConfig(BaseImageEditConfig):
         Get the API endpoint for a given model.
         """
         # Remove provider prefix if present (e.g., "black_forest_labs/flux-kontext-pro")
-        model_name = model.lower()
-        if "/" in model_name:
-            model_name = model_name.split("/")[-1]
+        model_name = normalize_bfl_model_name(model)
 
         # Check if model is in our mapping
         if model_name in IMAGE_EDIT_MODELS:
@@ -245,10 +245,11 @@ class BlackForestLabsImageEditConfig(BaseImageEditConfig):
         image_bytes: Final = self._read_image_bytes(image)
         b64_image: Final = base64.b64encode(image_bytes).decode("utf-8")
 
-        # Build request body
+        # Expand and fill key the image as `image`, kontext and flux-2 as
+        # `input_image`; the wrong name is a 422 (NOL-1097).
         request_body: Final[dict[str, Any]] = {
             "prompt": prompt,
-            "input_image": b64_image,
+            image_edit_image_field(model): b64_image,
         }
 
         # Add optional params (only BFL-recognized parameters)

@@ -39,6 +39,10 @@ def test_flat_priced_music_returns_fixed_audio_cost():
 
 
 def test_per_second_music_multiplies_decoded_duration():
+    # fal bills this app by the MINUTE at $0.60, so the per-second rate is
+    # 0.60 / 60 = 0.01 and a 30 s track costs $0.30. The map used to carry
+    # 0.013333 ($0.80/min), overstating every music COGS row by 33% (NOL-1098,
+    # fal's admin billing API cross-checked against the proxy ledger).
     response = types.SimpleNamespace(
         _hidden_params={"audio_output_duration": 30.0}
     )
@@ -49,7 +53,8 @@ def test_per_second_music_multiplies_decoded_duration():
         response=response,
     )
     assert prompt_cost == 0.0
-    assert completion_cost == pytest.approx(0.013333 * 30.0)
+    assert completion_cost == pytest.approx(0.01 * 30.0)
+    assert completion_cost == pytest.approx(0.30)
 
 
 def test_per_second_music_falls_back_to_zero_without_duration():
