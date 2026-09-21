@@ -111,10 +111,12 @@ IMAGE_EDIT_MODELS: Final[dict[str, str]] = {
 # shape and shares this transformation, so it is listed too even though no
 # Nolgia route reaches it yet. Everything else keeps `input_image`.
 DEFAULT_IMAGE_EDIT_IMAGE_FIELD: Final = "input_image"
-IMAGE_EDIT_IMAGE_FIELD_OVERRIDES: Final[dict[str, str]] = {
-    "flux-pro-1.0-expand": "image",
-    "flux-pro-1.0-fill": "image",
-}
+IMAGE_EDIT_IMAGE_FIELD_OVERRIDES: Mapping[str, str] = MappingProxyType(
+    {  # mutable-ok: frozen constant lookup table
+        "flux-pro-1.0-expand": "image",
+        "flux-pro-1.0-fill": "image",
+    }
+)
 
 
 def normalize_bfl_model_name(model: str) -> str:
