@@ -108,7 +108,11 @@ class TestGeminiOmniVideoConfig:
         assert request_data["model"] == MODEL
         assert request_data["input"] == "A marble rolling on a track."
         assert request_data["response_format"] == {"type": "video", "aspect_ratio": "9:16"}
-        assert request_data["background"] is True
+        # Synchronous create, not background: Google stopped resolving a
+        # backgrounded interaction id and answered GetInteraction with a bogus
+        # "API key not valid" 400 (NOL-1106). store stays true so the terminal
+        # interaction is still re-readable for status and for the output bytes.
+        assert request_data["background"] is False
         assert request_data["store"] is True
         assert files == []
 

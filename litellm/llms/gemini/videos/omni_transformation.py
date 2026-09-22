@@ -288,10 +288,35 @@ class GeminiOmniVideoConfig(BaseVideoConfig):
     Video generation for Gemini Omni models (e.g. gemini-omni-flash-preview).
 
     Unlike Veo, Omni models generate video through the Interactions API:
-    1. POST /v1beta/interactions with background=true returns an interaction id
-    2. Poll GET /v1beta/interactions/{id} until status is terminal
+    1. POST /v1beta/interactions with background=FALSE blocks until the render is
+       done and returns a terminal interaction (23 s for a 4 s generation, 38 s
+       for an edit of a 5 s source, measured on prod 2026-09-22)
+    2. GET /v1beta/interactions/{id} re-reads that stored interaction for status
+       and for the output bytes
     3. The completed interaction carries the video inline as base64 in the
        model_output step (or as a files URI for large outputs)
+
+    ``background`` is deliberately FALSE, which is a change from the
+    create-then-poll shape this config shipped with (NOL-1106). Google's
+    Interactions API stopped honoring ``background: true``: the POST still
+    answers 200 with an interaction id and ``status: "in_progress"``, but
+    GetInteraction then refuses that id forever with a 400 whose message
+    alternates between ``"API key not valid. Please pass a valid API key."`` and
+    ``"Request contains an invalid argument."`` -- the same credential, model and
+    request that the synchronous call accepts. The misleading auth wording is
+    Google's, not ours, and it is what surfaced to customers as a dead Recast
+    preset while veo (predictLongRunning + operations) and lyria, which never
+    touch Interactions, kept working. Measured from inside prod egress on
+    2026-09-22: a ``store: true`` interaction created with ``background: false``
+    is retrievable by GET indefinitely, so steps 2 and 3 are unchanged; one
+    created with ``background: true`` never is. Revive the async shape only
+    against a fresh measurement that GetInteraction resolves a backgrounded id.
+
+    The cost of synchronous create is that the POST holds a connection for the
+    render. nolgia-api's submit deadline is two minutes and litellm-proxy's Cloud
+    Run request timeout is 900 s, so the catalog's 3-10 second edit sources and
+    4-8 second generations fit; a materially longer Omni surface would need that
+    submit deadline raised before it could be advertised.
 
     Omni has no explicit duration/negative-prompt parameters; per Google's
     prompt guide both are expressed in the prompt text, which is what
@@ -427,7 +452,9 @@ class GeminiOmniVideoConfig(BaseVideoConfig):
             "model": model.replace("gemini/", ""),
             "input": full_prompt,
             "response_format": response_format,
-            "background": True,
+            # NOT background: see the class docstring -- Google no longer resolves
+            # a backgrounded interaction id (NOL-1106).
+            "background": False,
             "store": True,
         }
 
