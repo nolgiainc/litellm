@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from json import JSONDecodeError
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any  # noqa: TID251  # base video ABC + OpenAI video TypedDict are Any-typed
+from typing import TYPE_CHECKING, Any, Final  # noqa: TID251  # base video ABC + OpenAI video TypedDict are Any-typed
 from urllib.parse import unquote
 
 import httpx
@@ -93,8 +93,8 @@ _ESTIMATE_AUDIO_TRANSFER = "None"
 # reads from the footage. Present for the containers the ISO-BMFF reader does
 # not parse (mkv) and for callers that already measured their own source, e.g.
 # nolgia-api, which computes exactly these to resolve a restore tier against the
-# source aspect ratio. Consumed for the quote only: none of it reaches Topaz's
-# create body, which describes the job rather than the footage.
+# source aspect ratio. Spent on both legs: the estimate's quote, and since
+# NOL-1107 the create body's `source` block (see _create_source).
 _SOURCE_GEOMETRY_PARAMS = frozenset(
     (
         "source_width",
@@ -595,8 +595,9 @@ class TopazVideoConfig(BaseVideoConfig):
                 key: value for key, value in params.items() if key in _OUTPUT_PARAMS
             },
         }
+        declared_geometry: Final = self._declared_geometry(params)
         body = {  # mutable-ok: BaseVideoConfig contract returns dict body
-            "source": {"container": container},  # mutable-ok: request body fragment
+            "source": self._create_source(container, declared_geometry),
             "filters": [upscale_filter],  # mutable-ok: request body fragment
             "output": output,
         }
@@ -608,9 +609,37 @@ class TopazVideoConfig(BaseVideoConfig):
             output_width=width,
             output_height=height,
             output_frame_rate=_safe_float(params.get("frameRate")),
-            declared_geometry=self._declared_geometry(params),
+            declared_geometry=declared_geometry,
         )
         return body, (), f"{resolve_topaz_api_base(api_base)}/video/express"
+
+    @staticmethod
+    def _create_source(container: str, geometry: SourceGeometry | None) -> dict:  # mutable-ok: request body fragment
+        """
+        The `source` block of the create body.
+
+        Seven engines (slp-2.5, slf-2, wonder-1, slhq-1, slm-1, ganim-1,
+        color-1) reject a create that omits the source geometry, with
+        `frameCount is required` / `resolution is required`. Measured against
+        the live vendor 2026-09-22; every other engine accepts the block either
+        way, so it is sent whenever the caller declared one rather than gated on
+        a list of seven that would go stale (NOL-1107).
+
+        Declared geometry only: at create time the source bytes have not been
+        fetched yet, since the flow is create, then upload to the returned URL.
+        An undeclared source keeps today's bare block.
+        """
+        if geometry is None:
+            return {"container": container}  # mutable-ok: request body fragment
+        return {  # mutable-ok: request body fragment
+            "container": container,
+            "frameCount": geometry.frame_count,
+            "frameRate": geometry.frame_rate,
+            "resolution": {  # mutable-ok: request body fragment
+                "width": geometry.width,
+                "height": geometry.height,
+            },
+        }
 
     @staticmethod
     def _declared_geometry(params: Mapping[str, Any]) -> SourceGeometry | None:
