@@ -336,6 +336,65 @@ def test_create_request_rejects_a_nonempty_prompt_instead_of_ignoring_it():
         )
 
 
+_GEOMETRY = {
+    "source_width": 640,
+    "source_height": 360,
+    "source_frame_rate": 30,
+    "source_duration_seconds": 10,
+}
+
+
+def _create_body(**overrides: object) -> dict:
+    config = TopazVideoConfig()
+    body, _files, _url = config.transform_video_create_request(
+        model=MODEL,
+        prompt="",
+        api_base=None,
+        video_create_optional_request_params={**_mapped(), **overrides},
+        litellm_params=None,
+        headers={},
+    )
+    return body
+
+
+def test_create_request_sends_declared_source_geometry():
+    # NOL-1107: seven engines 400 the create without this block
+    assert _create_body(**_GEOMETRY)["source"] == {
+        "container": "mp4",
+        "frameCount": 300,
+        "frameRate": 30.0,
+        "resolution": {"width": 640, "height": 360},
+    }
+
+
+def test_create_request_omits_geometry_when_the_caller_declared_none():
+    assert _create_body()["source"] == {"container": "mp4"}
+
+
+@pytest.mark.parametrize("missing", ["source_width", "source_height", "source_frame_rate"])
+def test_create_request_omits_geometry_when_the_declaration_is_partial(missing: str):
+    # Partial geometry falls back to bare rather than guessing a frame count
+    partial = {k: v for k, v in _GEOMETRY.items() if k != missing}
+    assert _create_body(**partial)["source"] == {"container": "mp4"}
+
+
+def test_create_request_falls_back_to_seconds_for_an_undeclared_duration():
+    # `seconds` is the same quantity, so it stands in for the duration
+    partial = {k: v for k, v in _GEOMETRY.items() if k != "source_duration_seconds"}
+    assert _create_body(**partial)["source"] == {
+        "container": "mp4",
+        "frameCount": 60,
+        "frameRate": 30.0,
+        "resolution": {"width": 640, "height": 360},
+    }
+
+
+def test_create_request_geometry_survives_a_container_override():
+    body = _create_body(**_GEOMETRY, container="MOV")
+    assert body["source"]["container"] == "mov"
+    assert body["source"]["frameCount"] == 300
+
+
 @pytest.mark.parametrize("prompt", ["", "   ", None])
 def test_create_request_still_accepts_an_empty_prompt(prompt):
     config = TopazVideoConfig()
