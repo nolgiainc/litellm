@@ -1,10 +1,11 @@
 #### Video Endpoints #####
 
+from collections.abc import AsyncIterator
 from types import MappingProxyType
 from typing import Final
 
 from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from litellm.proxy._types import *
@@ -835,6 +836,24 @@ def _video_content_media_type(content: object) -> tuple[str, str]:
     return "video/mp4", "mp4"
 
 
+# Cloud Run caps a buffered HTTP/1 response at 32 MiB and turns anything larger into an empty 500.
+# A body sent without Content-Length (chunked) is exempt, so video content is always streamed.
+_VIDEO_CONTENT_CHUNK_BYTES: Final = 1024 * 1024
+
+
+async def _video_content_chunks(content: bytes | bytearray) -> AsyncIterator[bytes]:
+    for offset in range(0, len(content), _VIDEO_CONTENT_CHUNK_BYTES):
+        yield bytes(content[offset : offset + _VIDEO_CONTENT_CHUNK_BYTES])
+
+
+def _video_content_response(content: object, video_id: str) -> Response:
+    media_type, extension = _video_content_media_type(content)
+    headers: Final = MappingProxyType({"Content-Disposition": f"attachment; filename=video_{video_id}.{extension}"})
+    if not isinstance(content, (bytes, bytearray)):
+        return Response(content=content, media_type=media_type, headers=headers)
+    return StreamingResponse(_video_content_chunks(content), media_type=media_type, headers=headers)
+
+
 @router.get(
     "/v1/videos/{video_id}/content",
     dependencies=[Depends(user_api_key_auth)],
@@ -932,12 +951,7 @@ async def video_content(
             version=version,
         )
 
-        media_type, extension = _video_content_media_type(video_bytes)
-        return Response(
-            content=video_bytes,
-            media_type=media_type,
-            headers={"Content-Disposition": f"attachment; filename=video_{video_id}.{extension}"},
-        )
+        return _video_content_response(video_bytes, video_id)
     except Exception as e:
         raise await processor._handle_llm_api_exception(
             e=e,

@@ -15,7 +15,7 @@ therefore locks four things:
                     model resolution from the decoded model_id, and file attachment.
   3. RESULT       - base_process_llm_request's return value is propagated untouched
                     (except where the endpoint transforms it).
-  4. OUTPUT SHAPE - video_content wraps raw bytes in a Response (video/mp4 +
+  4. OUTPUT SHAPE - video_content streams raw bytes (sniffed media type +
                     Content-Disposition).
 
 Only true I/O boundaries are mocked (the downstream processor call, request body
@@ -35,6 +35,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import orjson
 import pytest
 from fastapi import Response
+from fastapi.responses import StreamingResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from litellm.proxy import proxy_server
@@ -323,6 +324,10 @@ async def call_content(harness: Harness, video_id: str, *, headers=None, query=N
     )
 
 
+async def streamed_body(response: StreamingResponse) -> bytes:
+    return b"".join([chunk async for chunk in response.body_iterator])
+
+
 @pytest.mark.asyncio
 async def test_content__wraps_raw_bytes_in_response(harness):
     harness.base_process.return_value = b"VIDEOBYTES"
@@ -330,8 +335,8 @@ async def test_content__wraps_raw_bytes_in_response(harness):
     resp = await call_content(harness, "video_plain")
 
     assert harness.route_type() == "avideo_content"
-    assert isinstance(resp, Response)
-    assert resp.body == b"VIDEOBYTES"
+    assert isinstance(resp, StreamingResponse)
+    assert await streamed_body(resp) == b"VIDEOBYTES"
     assert resp.media_type == "video/mp4"
     assert (
         resp.headers["content-disposition"]
@@ -386,6 +391,32 @@ def test_content__forwards_variant_over_http(harness: Harness, path: str, varian
     )
 
 
+CLOUD_RUN_BUFFERED_RESPONSE_CAP: Final = 32 * 1024 * 1024
+
+
+def test_content__over_cloud_run_cap_streams_without_content_length(harness: Harness) -> None:
+    """Cloud Run replaces a buffered HTTP/1 response over 32 MiB with an empty 500, which lost every
+    oversized render (NOL-1134). Only a body sent without Content-Length is exempt from that cap."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app: Final = FastAPI()
+    app.include_router(endpoints.router)
+    app.dependency_overrides[endpoints.user_api_key_auth] = _user
+    glb: Final = b"glTF\x02\x00\x00\x00" + bytes(range(256)) * (CLOUD_RUN_BUFFERED_RESPONSE_CAP // 256 + 1)
+    harness.base_process.return_value = glb
+
+    with TestClient(app) as client:
+        response: Final = client.get("/v1/videos/video_plain/content")
+
+    assert response.status_code == 200
+    assert "content-length" not in response.headers
+    assert len(response.content) > CLOUD_RUN_BUFFERED_RESPONSE_CAP
+    assert response.content == glb
+    assert response.headers["content-type"] == "model/gltf-binary"
+    assert response.headers["content-disposition"] == "attachment; filename=video_video_plain.glb"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("content", "media_type", "extension"),
@@ -414,7 +445,8 @@ async def test_content__sniffs_media_bytes(harness: Harness, content: bytes, med
 
     response: Final = await call_content(harness, "video_plain")
 
-    assert response.body == content
+    assert isinstance(response, StreamingResponse)
+    assert await streamed_body(response) == content
     assert response.media_type == media_type
     assert response.headers["content-type"] == media_type
     assert response.headers["content-disposition"] == f"attachment; filename=video_video_plain.{extension}"
