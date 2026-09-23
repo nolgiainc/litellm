@@ -13,12 +13,15 @@ from litellm.constants import request_timeout as DEFAULT_REQUEST_TIMEOUT
 from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.llms.base_llm.videos.transformation import BaseVideoConfig
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
 from litellm.main import base_llm_http_handler
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CallTypes, FileTypes
 from litellm.types.videos.main import (
     CharacterObject,
+    VideoCancelRefusal,
+    VideoCancelResult,
     VideoCreateOptionalRequestParams,
     VideoObject,
 )
@@ -1097,6 +1100,112 @@ def video_status(
             completion_kwargs=local_vars,
             extra_kwargs=kwargs,
         )
+
+
+##### Video Cancel #######################
+@client
+async def avideo_cancel(
+    video_id: str,
+    timeout: float = 600,
+    custom_llm_provider: str | None = None,
+    extra_headers: dict[str, str] | None = None,  # mutable-ok: forwarded to the provider request headers
+    **kwargs: object,  # kwargs-ok: router/proxy call metadata, forwarded verbatim like every video operation
+) -> VideoCancelResult:
+    """
+    Asynchronously cancel a video render at its provider. See `video_cancel`.
+    """
+    local_vars: Final = locals()
+    try:
+        loop: Final = asyncio.get_event_loop()
+        func: Final = partial(
+            video_cancel,
+            video_id=video_id,
+            timeout=timeout,
+            custom_llm_provider=custom_llm_provider,
+            extra_headers=extra_headers,
+            **kwargs,
+            async_call=True,
+        )
+        init_response: Final = await loop.run_in_executor(None, partial(contextvars.copy_context().run, func))
+        return await init_response if asyncio.iscoroutine(init_response) else init_response
+    except Exception as e:  # noqa: BLE001  # mapped to the public exception contract, like every video operation
+        raise litellm.exception_type(
+            model="",
+            custom_llm_provider=custom_llm_provider,
+            original_exception=e,
+            completion_kwargs=local_vars,
+            extra_kwargs=kwargs,
+        )
+
+
+@client
+def video_cancel(
+    video_id: str,
+    timeout: float = 600,
+    custom_llm_provider: str | None = None,
+    extra_headers: dict[str, str] | None = None,  # mutable-ok: forwarded to the provider request headers
+    **kwargs: object,  # kwargs-ok: router/proxy call metadata, forwarded verbatim like every video operation
+) -> VideoCancelResult | Coroutine[object, object, VideoCancelResult]:
+    """
+    Cancel a video render at its provider.
+
+    Returns a VideoCancelObject when the provider accepted the cancel (cancel_outcome says whether it
+    will be billed), or a VideoCancelRefusal when it did not: `too_late` (already running where the
+    provider refuses, or finished), `not_found`, or `unsupported` (the provider has no cancel API).
+    Transport and auth failures still raise.
+    """
+    local_vars: Final = locals()
+    decoded: Final = decode_video_id_with_provider(video_id)
+    provider: Final = custom_llm_provider or decoded.get("custom_llm_provider") or "openai"
+    try:
+        litellm_logging_obj: Final = kwargs.get("litellm_logging_obj")
+        if not isinstance(litellm_logging_obj, LiteLLMLoggingObj):
+            raise TypeError("video_cancel requires the litellm_logging_obj the @client wrapper injects")
+        is_async: Final = kwargs.get("async_call") is True
+        provider_config: Final = ProviderConfigManager.get_provider_video_config(
+            model=decoded.get("model_id"),
+            provider=litellm.LlmProviders(provider),
+        )
+        if provider_config is None:
+            return VideoCancelRefusal(reason="unsupported", message=f"video cancel is not supported for {provider}")
+
+        user: Final = kwargs.get("user")
+        litellm_logging_obj.update_from_kwargs(
+            kwargs=kwargs,
+            model="",
+            user=user if isinstance(user, str) else None,
+            optional_params={"video_id": video_id},  # mutable-ok: the logging API takes dicts
+            litellm_params={  # mutable-ok: the logging API takes dicts
+                "litellm_call_id": kwargs.get("litellm_call_id"),
+                "video_id": video_id,
+            },
+            custom_llm_provider=provider,
+        )
+        litellm_logging_obj.call_type = CallTypes.video_cancel.value
+
+        return base_llm_http_handler.video_cancel_handler(
+            video_id=video_id,
+            video_cancel_provider_config=provider_config,
+            custom_llm_provider=provider,
+            litellm_params=GenericLiteLLMParams.model_validate(kwargs),
+            logging_obj=litellm_logging_obj,
+            extra_headers=extra_headers,
+            timeout=timeout or DEFAULT_REQUEST_TIMEOUT,
+            _is_async=is_async,
+            client=_video_cancel_client(kwargs.get("client")),
+        )
+    except Exception as e:  # noqa: BLE001  # mapped to the public exception contract, like every video operation
+        raise litellm.exception_type(
+            model="",
+            custom_llm_provider=provider,
+            original_exception=e,
+            completion_kwargs=local_vars,
+            extra_kwargs=kwargs,
+        )
+
+
+def _video_cancel_client(client: object) -> HTTPHandler | AsyncHTTPHandler | None:
+    return client if isinstance(client, (HTTPHandler, AsyncHTTPHandler)) else None
 
 
 @client

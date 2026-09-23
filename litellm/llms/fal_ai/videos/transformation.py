@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 import httpx
 from httpx._types import RequestFiles
+from pydantic import JsonValue, TypeAdapter, ValidationError
 from typing_extensions import assert_never
 
 import litellm
@@ -25,7 +26,16 @@ from litellm.llms.fal_ai.utils import normalize_fal_model_id as _normalize_fal_m
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import FileTypes
-from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
+from litellm.types.videos.main import (
+    VideoCancelAccepted,
+    VideoCancelPreflight,
+    VideoCancelProceed,
+    VideoCancelRefusal,
+    VideoCancelRequest,
+    VideoCancelVerdict,
+    VideoCreateOptionalRequestParams,
+    VideoObject,
+)
 from litellm.types.videos.utils import (
     decode_video_id_with_provider,
     encode_video_id_with_provider,
@@ -255,6 +265,24 @@ def _parse_queue_state(payload: Mapping[str, object]) -> _QueueState:
     if normalized == "IN_PROGRESS":
         return _QueuePending("in_progress", position)
     return _QueuePending("queued", position)
+
+
+_FAL_CANCEL_NOT_FOUND: Final = VideoCancelRefusal(reason="not_found", message="fal.ai has no request with this id")
+
+
+_JSON_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
+
+
+def _json_mapping(raw_response: httpx.Response) -> Mapping[str, JsonValue] | None:
+    try:
+        return _JSON_OBJECT.validate_json(raw_response.content)
+    except ValidationError:
+        return None
+
+
+def _fal_queue_status(payload: Mapping[str, object] | None) -> str:
+    status: Final = payload.get("status") if payload is not None else None
+    return status.upper() if isinstance(status, str) else ""
 
 
 _BASE_CAPABILITY_PARAMS = frozenset(
@@ -906,6 +934,68 @@ class FalAIVideoConfig(BaseVideoConfig):
         custom_llm_provider: str | None = None,
     ) -> dict[str, str]:
         raise NotImplementedError("Video listing is not supported by the fal.ai queue API")
+
+    def transform_video_cancel_request(
+        self,
+        video_id: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+    ) -> VideoCancelRequest:
+        original_id, model_id = self._extract_request_and_model_id(video_id)
+        encoded: Final = encode_url_path_segment(original_id, field_name="video_id")
+        request_url: Final = f"{api_base}/{self._queue_request_namespace(model_id)}/requests/{encoded}"
+        return VideoCancelRequest(
+            status_url=f"{request_url}/status",
+            cancel_method="PUT",
+            cancel_url=f"{request_url}/cancel",
+            recheck_url=f"{request_url}/status",
+        )
+
+    def transform_video_cancel_status_response(self, raw_response: httpx.Response) -> VideoCancelPreflight:
+        if raw_response.status_code == 404:
+            return _FAL_CANCEL_NOT_FOUND
+        status: Final = _fal_queue_status(self._status_payload(raw_response))
+        match status:
+            case "IN_QUEUE":
+                return VideoCancelProceed(VideoCancelAccepted(outcome="cancelled", provider_status=status))
+            case "IN_PROGRESS":
+                return VideoCancelProceed(VideoCancelAccepted(outcome="requested", provider_status=status))
+            case _:
+                return VideoCancelRefusal(
+                    reason="too_late",
+                    message=f"fal.ai request is {status or 'in an unknown state'} and can no longer be cancelled",
+                )
+
+    def transform_video_cancel_response(
+        self,
+        raw_response: httpx.Response,
+        proceed: VideoCancelProceed,
+    ) -> VideoCancelVerdict:
+        if raw_response.is_success:
+            return proceed.if_accepted
+        if raw_response.status_code == 404:
+            return _FAL_CANCEL_NOT_FOUND
+        if raw_response.status_code == 400 and _fal_queue_status(_json_mapping(raw_response)) == "ALREADY_COMPLETED":
+            return VideoCancelRefusal(
+                reason="too_late",
+                message="fal.ai request already completed before the cancel arrived",
+            )
+        raise self.get_error_class(
+            error_message=raw_response.text,
+            status_code=raw_response.status_code,
+            headers=raw_response.headers,
+        )
+
+    def transform_video_cancel_recheck_response(
+        self,
+        raw_response: httpx.Response,
+        accepted: VideoCancelAccepted,
+    ) -> VideoCancelAccepted:
+        # A runner can claim the request between the status read and the cancel; fal still answers
+        # 202, so only a re-read shows that the render started and may bill.
+        if raw_response.is_success and _fal_queue_status(_json_mapping(raw_response)) == "IN_PROGRESS":
+            return VideoCancelAccepted(outcome="requested", provider_status="IN_PROGRESS")
+        return accepted
 
     def transform_video_delete_request(
         self,

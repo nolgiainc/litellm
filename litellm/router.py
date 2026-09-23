@@ -1820,6 +1820,7 @@ class Router:
     def _initialize_video_endpoints(self):
         """Initialize video endpoints."""
         from litellm.videos import (
+            avideo_cancel,
             avideo_content,
             avideo_create_character,
             avideo_edit,
@@ -1829,6 +1830,7 @@ class Router:
             avideo_list,
             avideo_remix,
             avideo_status,
+            video_cancel,
             video_content,
             video_create_character,
             video_edit,
@@ -1846,6 +1848,8 @@ class Router:
         self.video_list = self.factory_function(video_list, call_type="video_list")
         self.avideo_status = self.factory_function(avideo_status, call_type="avideo_status")
         self.video_status = self.factory_function(video_status, call_type="video_status")
+        self.avideo_cancel = self.factory_function(avideo_cancel, call_type="avideo_cancel")
+        self.video_cancel = self.factory_function(video_cancel, call_type="video_cancel")
         self.avideo_content = self.factory_function(avideo_content, call_type="avideo_content")
         self.video_content = self.factory_function(video_content, call_type="video_content")
         self.avideo_remix = self.factory_function(avideo_remix, call_type="avideo_remix")
@@ -6481,6 +6485,8 @@ class Router:
             "video_list",
             "avideo_status",
             "video_status",
+            "avideo_cancel",
+            "video_cancel",
             "avideo_content",
             "video_content",
             "avideo_remix",
@@ -6550,6 +6556,7 @@ class Router:
             "video_generation",
             "video_list",
             "video_status",
+            "video_cancel",
             "video_content",
             "video_remix",
             "create_container",
@@ -6717,6 +6724,7 @@ class Router:
                 "avideo_generation",
                 "avideo_list",
                 "avideo_status",
+                "avideo_cancel",
                 "avideo_content",
                 "avideo_remix",
                 "avideo_create_character",

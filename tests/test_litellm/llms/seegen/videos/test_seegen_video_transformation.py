@@ -1363,3 +1363,150 @@ def test_seedance_refuses_an_aspect_ratio_ark_does_not_list() -> None:
         )
 
     assert exc_info.value.status_code == 400
+
+
+def _cancel_transport(task_url: str, status_response: tuple[int, JsonValue], cancel_response: tuple[int, JsonValue]):
+    calls: list[tuple[str, str]] = []
+
+    def route(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, str(request.url)))
+        status_code, body = status_response if request.method == "GET" else cancel_response
+        assert str(request.url) == (task_url if request.method in ("GET", "DELETE") else f"{task_url}/cancel")
+        return httpx.Response(status_code, json=body, request=request)
+
+    return calls, HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(route)))
+
+
+SEEDANCE_TASK_URL = f"{API_BASE}/v1/contents/generations/tasks/cgt-cancel"
+SEEDANCE_CANCEL_ID = encode_video_id_with_provider("cgt-cancel", "seegen", SEEDANCE_MODEL)
+
+
+def _seedance_task(status: str) -> dict[str, JsonValue]:
+    return {"id": "cgt-cancel", "status": status}
+
+
+@pytest.mark.parametrize(
+    ("task_status", "cancel_response", "expected", "methods"),
+    [
+        pytest.param(
+            "queued",
+            (204, None),
+            {"cancel_outcome": "cancelled", "provider_status": "queued"},
+            ["GET", "DELETE"],
+            id="queued-is-cancelled",
+        ),
+        pytest.param(
+            "cancelled",
+            (500, None),
+            {"cancel_outcome": "cancelled", "provider_status": "cancelled"},
+            ["GET"],
+            id="already-cancelled-is-idempotent",
+        ),
+    ],
+)
+def test_seedance_cancel_accepted(task_status, cancel_response, expected, methods) -> None:
+    calls, client = _cancel_transport(SEEDANCE_TASK_URL, (200, _seedance_task(task_status)), cancel_response)
+
+    result = litellm.video_cancel(video_id=SEEDANCE_CANCEL_ID, api_key="test-key", client=client)
+
+    assert result.model_dump(exclude_none=True) == {
+        "id": SEEDANCE_CANCEL_ID,
+        "object": "video",
+        "status": "cancelled",
+        **expected,
+    }
+    assert [method for method, _ in calls] == methods
+
+
+@pytest.mark.parametrize(
+    ("status_response", "cancel_response", "reason", "methods"),
+    [
+        # Ark's DELETE deletes the record of a finished task, so anything past queued is refused unsent.
+        pytest.param((200, _seedance_task("running")), (204, None), "too_late", ["GET"], id="running"),
+        pytest.param((200, _seedance_task("succeeded")), (204, None), "too_late", ["GET"], id="succeeded"),
+        pytest.param((200, _seedance_task("failed")), (204, None), "too_late", ["GET"], id="failed"),
+        pytest.param((200, _seedance_task("expired")), (204, None), "too_late", ["GET"], id="expired"),
+        pytest.param(
+            (200, _seedance_task("queued")),
+            (409, {"error": "task_conflict", "message": "task is changing state"}),
+            "too_late",
+            ["GET", "DELETE"],
+            id="left-the-queue-before-the-delete",
+        ),
+        pytest.param(
+            (404, {"error": {"code": "ResourceNotFound", "message": "task not found"}}),
+            (204, None),
+            "not_found",
+            ["GET"],
+            id="unknown-task",
+        ),
+    ],
+)
+def test_seedance_cancel_refused(status_response, cancel_response, reason, methods) -> None:
+    calls, client = _cancel_transport(SEEDANCE_TASK_URL, status_response, cancel_response)
+
+    result = litellm.video_cancel(video_id=SEEDANCE_CANCEL_ID, api_key="test-key", client=client)
+
+    assert result.reason == reason
+    assert [method for method, _ in calls] == methods
+
+
+DASHSCOPE_TASK_URL = f"{API_BASE}/api/v1/tasks/task-cancel"
+
+
+def _dashscope_task(task_status: str) -> dict[str, JsonValue]:
+    return {"request_id": "req-1", "output": {"task_id": "task-cancel", "task_status": task_status}}
+
+
+@pytest.mark.parametrize("model", [HAPPYHORSE_MODEL, WAN_MODEL, "nsfw-wan3.0-video-prime"])
+def test_dashscope_cancel_posts_the_task_cancel_for_a_pending_task(model: str) -> None:
+    calls, client = _cancel_transport(
+        DASHSCOPE_TASK_URL,
+        (200, _dashscope_task("PENDING")),
+        (200, "req-cancel"),
+    )
+    video_id = encode_video_id_with_provider("task-cancel", "seegen", model)
+
+    result = litellm.video_cancel(video_id=video_id, api_key="test-key", client=client)
+
+    assert (result.cancel_outcome, result.provider_status) == ("cancelled", "PENDING")
+    assert calls == [("GET", DASHSCOPE_TASK_URL), ("POST", f"{DASHSCOPE_TASK_URL}/cancel")]
+
+
+@pytest.mark.parametrize(
+    ("status_response", "cancel_response", "reason", "methods"),
+    [
+        pytest.param((200, _dashscope_task("RUNNING")), (200, "x"), "too_late", ["GET"], id="running"),
+        pytest.param((200, _dashscope_task("SUCCEEDED")), (200, "x"), "too_late", ["GET"], id="succeeded"),
+        pytest.param((200, _dashscope_task("UNKNOWN")), (200, "x"), "not_found", ["GET"], id="unknown-task"),
+        pytest.param(
+            (200, _dashscope_task("PENDING")),
+            (400, {"code": "UnsupportedOperation", "message": "Failed to cancel the task."}),
+            "too_late",
+            ["GET", "POST"],
+            id="started-before-the-cancel",
+        ),
+        pytest.param(
+            (200, _dashscope_task("PENDING")),
+            (404, {"error": "not_found", "message": "route not found"}),
+            "unsupported",
+            ["GET", "POST"],
+            id="gateway-has-no-cancel-route",
+        ),
+        pytest.param(
+            (200, _dashscope_task("PENDING")),
+            (405, {"error": "method_not_allowed", "message": "method not allowed"}),
+            "unsupported",
+            ["GET", "POST"],
+            id="gateway-refuses-the-method",
+        ),
+    ],
+)
+def test_dashscope_cancel_refused(status_response, cancel_response, reason, methods) -> None:
+    calls, client = _cancel_transport(DASHSCOPE_TASK_URL, status_response, cancel_response)
+    video_id = encode_video_id_with_provider("task-cancel", "seegen", HAPPYHORSE_MODEL)
+
+    result = litellm.video_cancel(video_id=video_id, api_key="test-key", client=client)
+
+    assert result.reason == reason
+    assert [method for method, _ in calls] == methods

@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import httpx
 from httpx._types import FileContent
 from openai.types.file_deleted import FileDeleted
+from typing_extensions import assert_never
 
 import litellm
 import litellm.litellm_core_utils
@@ -150,7 +151,16 @@ from litellm.types.vector_stores import (
     VectorStoreSearchOptionalRequestParams,
     VectorStoreSearchResponse,
 )
-from litellm.types.videos.main import VideoObject
+from litellm.types.videos.main import (
+    VideoCancelAccepted,
+    VideoCancelObject,
+    VideoCancelProceed,
+    VideoCancelRefusal,
+    VideoCancelRequest,
+    VideoCancelResult,
+    VideoCancelVerdict,
+    VideoObject,
+)
 from litellm.utils import (
     CustomStreamWrapper,
     ImageResponse,
@@ -8715,6 +8725,188 @@ class BaseLLMHTTPHandler:
                 e=e,
                 provider_config=video_status_provider_config,
             )
+
+    def video_cancel_handler(
+        self,
+        video_id: str,
+        video_cancel_provider_config: BaseVideoConfig,
+        custom_llm_provider: str,
+        litellm_params: GenericLiteLLMParams,
+        logging_obj: LiteLLMLoggingObj,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        _is_async: bool = False,
+        client: HTTPHandler | AsyncHTTPHandler | None = None,
+    ) -> VideoCancelResult | Coroutine[object, object, VideoCancelResult]:
+        """
+        Cancel a video render at its provider: read the task status, send the cancel only when that
+        status allows one, then build the result. A provider that says no comes back as a
+        VideoCancelRefusal value rather than an exception, so the router neither retries it nor
+        cools the deployment down.
+        """
+        if _is_async:
+            return self.async_video_cancel_handler(
+                video_id=video_id,
+                video_cancel_provider_config=video_cancel_provider_config,
+                custom_llm_provider=custom_llm_provider,
+                litellm_params=litellm_params,
+                logging_obj=logging_obj,
+                extra_headers=extra_headers,
+                timeout=timeout,
+                client=client,
+            )
+        prepared: Final = self._prepare_video_cancel(
+            video_id, video_cancel_provider_config, litellm_params, logging_obj, extra_headers
+        )
+        if isinstance(prepared, VideoCancelRefusal):
+            return prepared
+        request, headers = prepared
+        client_params: Final = {"ssl_verify": litellm_params.get("ssl_verify")}  # mutable-ok: factory takes a dict
+        sync_client: Final = client if isinstance(client, HTTPHandler) else _get_httpx_client(params=client_params)
+        try:
+            preflight: Final = video_cancel_provider_config.transform_video_cancel_status_response(
+                sync_client.get(url=request.status_url, headers=headers, timeout=timeout)
+            )
+            if not isinstance(preflight, VideoCancelProceed):
+                return self._video_cancel_result(video_id, preflight)
+            verdict: Final = video_cancel_provider_config.transform_video_cancel_response(
+                sync_client.client.request(
+                    request.cancel_method,
+                    request.cancel_url,
+                    headers=headers,
+                    timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+                ),
+                preflight,
+            )
+        except Exception as e:  # noqa: BLE001  # re-mapped by the provider's error class, like every video handler
+            raise self._handle_error(e=e, provider_config=video_cancel_provider_config)
+        if (
+            request.recheck_url is None
+            or not isinstance(verdict, VideoCancelAccepted)
+            or verdict.outcome != "cancelled"
+        ):
+            return self._video_cancel_result(video_id, verdict)
+        try:
+            recheck: Final = sync_client.get(url=request.recheck_url, headers=headers, timeout=timeout)
+        except httpx.HTTPError:
+            # The cancel already went through; a failed re-read must not turn it into an error.
+            return self._video_cancel_result(video_id, verdict)
+        return self._video_cancel_result(
+            video_id, video_cancel_provider_config.transform_video_cancel_recheck_response(recheck, verdict)
+        )
+
+    async def async_video_cancel_handler(
+        self,
+        video_id: str,
+        video_cancel_provider_config: BaseVideoConfig,
+        custom_llm_provider: str,
+        litellm_params: GenericLiteLLMParams,
+        logging_obj: LiteLLMLoggingObj,
+        extra_headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        client: HTTPHandler | AsyncHTTPHandler | None = None,
+    ) -> VideoCancelResult:
+        prepared: Final = self._prepare_video_cancel(
+            video_id, video_cancel_provider_config, litellm_params, logging_obj, extra_headers
+        )
+        if isinstance(prepared, VideoCancelRefusal):
+            return prepared
+        request, headers = prepared
+        client_params: Final = {"ssl_verify": litellm_params.get("ssl_verify")}  # mutable-ok: factory takes a dict
+        async_client: Final = (
+            client
+            if isinstance(client, AsyncHTTPHandler)
+            else get_async_httpx_client(llm_provider=litellm.LlmProviders(custom_llm_provider), params=client_params)
+        )
+        try:
+            preflight: Final = video_cancel_provider_config.transform_video_cancel_status_response(
+                await async_client.get(url=request.status_url, headers=headers, timeout=timeout)
+            )
+            if not isinstance(preflight, VideoCancelProceed):
+                return self._video_cancel_result(video_id, preflight)
+            # Sent on the raw client: the handler's put/delete helpers retry a dropped connection as a
+            # POST, which must never happen to a cancel.
+            verdict: Final = video_cancel_provider_config.transform_video_cancel_response(
+                await async_client.client.request(
+                    request.cancel_method,
+                    request.cancel_url,
+                    headers=headers,
+                    timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+                ),
+                preflight,
+            )
+        except Exception as e:  # noqa: BLE001  # re-mapped by the provider's error class, like every video handler
+            raise self._handle_error(e=e, provider_config=video_cancel_provider_config)
+        if (
+            request.recheck_url is None
+            or not isinstance(verdict, VideoCancelAccepted)
+            or verdict.outcome != "cancelled"
+        ):
+            return self._video_cancel_result(video_id, verdict)
+        try:
+            recheck: Final = await async_client.get(url=request.recheck_url, headers=headers, timeout=timeout)
+        except httpx.HTTPError:
+            # The cancel already went through; a failed re-read must not turn it into an error.
+            return self._video_cancel_result(video_id, verdict)
+        return self._video_cancel_result(
+            video_id, video_cancel_provider_config.transform_video_cancel_recheck_response(recheck, verdict)
+        )
+
+    @staticmethod
+    def _prepare_video_cancel(
+        video_id: str,
+        video_cancel_provider_config: BaseVideoConfig,
+        litellm_params: GenericLiteLLMParams,
+        logging_obj: LiteLLMLoggingObj,
+        extra_headers: Mapping[str, str] | None,
+    ) -> tuple[VideoCancelRequest, dict[str, str]] | VideoCancelRefusal:  # mutable-ok: httpx takes dict headers
+        api_base: Final = video_cancel_provider_config.get_complete_url(
+            model="",
+            api_base=litellm_params.get("api_base", None),
+            litellm_params=dict(litellm_params),  # mutable-ok: get_complete_url takes a dict
+        )
+        try:
+            request: Final = video_cancel_provider_config.transform_video_cancel_request(
+                video_id=video_id,
+                api_base=api_base,
+                litellm_params=litellm_params,
+            )
+        except NotImplementedError as e:
+            return VideoCancelRefusal(reason="unsupported", message=str(e))
+        headers: Final = {  # mutable-ok: httpx sends dict headers
+            **video_cancel_provider_config.validate_environment(
+                api_key=None,
+                headers=dict(extra_headers or {}),  # mutable-ok: validate_environment fills a dict
+                model="",
+                litellm_params=litellm_params,
+            ),
+            **(extra_headers or {}),  # mutable-ok: empty default for the optional caller headers
+        }
+        logging_obj.pre_call(
+            input="",
+            api_key="",
+            additional_args={  # mutable-ok: the logging API takes a dict
+                "api_base": request.cancel_url,
+                "headers": headers,
+                "video_id": video_id,
+            },
+        )
+        return request, headers
+
+    @staticmethod
+    def _video_cancel_result(video_id: str, verdict: VideoCancelVerdict) -> VideoCancelResult:
+        match verdict:
+            case VideoCancelAccepted(outcome=outcome, provider_status=provider_status, progress=progress):
+                return VideoCancelObject(
+                    id=video_id,
+                    cancel_outcome=outcome,
+                    provider_status=provider_status,
+                    progress=progress,
+                )
+            case VideoCancelRefusal():
+                return verdict
+            case _:
+                assert_never(verdict)
 
     ###### CONTAINER HANDLER ######
     def container_create_handler(

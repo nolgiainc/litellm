@@ -10,11 +10,20 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.types.router import GenericLiteLLMParams
-from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
+from litellm.types.videos.main import (
+    VideoCancelAccepted,
+    VideoCancelPreflight,
+    VideoCancelProceed,
+    VideoCancelRefusal,
+    VideoCancelRequest,
+    VideoCancelVerdict,
+    VideoCreateOptionalRequestParams,
+    VideoObject,
+)
 from litellm.types.videos.utils import encode_video_id_with_provider
 from litellm.videos.capabilities import CapabilityParamSupport, DeclaredCapabilityParams
 
-from ..common_utils import EMPTY_JSON_OBJECT, JsonValue, SeeGenError, parse_json_mapping
+from ..common_utils import EMPTY_JSON_OBJECT, JsonValue, SeeGenError, error_from_http_response, parse_json_mapping
 from .base import SeeGenVideoConfig
 from .frames import resolve_frame_media
 from .models import model_name, video_family
@@ -30,6 +39,7 @@ _CREATE_PATH: Final = "/v1/contents/generations/tasks"
 _STRING_LIST_ADAPTER: Final = TypeAdapter(list[str])
 _JSON_LIST_ADAPTER: Final = TypeAdapter(list[JsonValue])
 _EMPTY_REQUEST_FILES: Final = TypeAdapter(list[tuple[str, str]]).validate_python(())
+_CANCEL_NOT_FOUND: Final = VideoCancelRefusal(reason="not_found", message="SeeGen has no Seedance task with this id")
 
 
 class _VideoURL(BaseModel):
@@ -342,6 +352,49 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
             case None:
                 pass
         raise SeeGenError(status_code=502, message="upstream_malformed: Seedance response has no video URL")
+
+    def transform_video_cancel_request(
+        self,
+        video_id: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+    ) -> VideoCancelRequest:
+        task_id: Final = self._remember_video_model(video_id)
+        task_url: Final = f"{api_base.rstrip('/')}{_CREATE_PATH}/{self._encoded_task_id(task_id)}"
+        return VideoCancelRequest(status_url=task_url, cancel_method="DELETE", cancel_url=task_url)
+
+    def transform_video_cancel_status_response(self, raw_response: httpx.Response) -> VideoCancelPreflight:
+        # Ark's DELETE cancels only a queued task and permanently deletes the record of a finished one,
+        # so it is sent for the queued state alone.
+        if raw_response.status_code == 404:
+            return _CANCEL_NOT_FOUND
+        task: Final = self._parse_task(raw_response)
+        match task.status:
+            case "queued":
+                return VideoCancelProceed(VideoCancelAccepted(outcome="cancelled", provider_status=task.status))
+            case "cancelled":
+                return VideoCancelAccepted(outcome="cancelled", provider_status=task.status)
+            case "running" | "succeeded" | "failed" | "expired":
+                return VideoCancelRefusal(
+                    reason="too_late",
+                    message=f"Seedance task is {task.status} and can no longer be cancelled",
+                )
+
+    def transform_video_cancel_response(
+        self,
+        raw_response: httpx.Response,
+        proceed: VideoCancelProceed,
+    ) -> VideoCancelVerdict:
+        if raw_response.is_success:
+            return proceed.if_accepted
+        if raw_response.status_code == 404:
+            return _CANCEL_NOT_FOUND
+        if raw_response.status_code == 409:
+            return VideoCancelRefusal(
+                reason="too_late",
+                message="Seedance task left the queue before the cancel arrived",
+            )
+        raise error_from_http_response(raw_response)
 
     def transform_video_delete_request(
         self,

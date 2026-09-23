@@ -453,3 +453,36 @@ def test_db_yaml_credentials_reach_every_handler(seams, handler_name, invoke):
     assert litellm_params.get("api_base") == DB_YAML_CREDS["api_base"]
     assert litellm_params.get("api_version") == DB_YAML_CREDS["api_version"]
     assert litellm_params.get("vertex_project") == DB_YAML_CREDS["vertex_project"]
+
+
+# =========================================================================== #
+# Cancel - a provider with no cancel API answers "unsupported" before any I/O. #
+# =========================================================================== #
+
+
+@pytest.mark.parametrize(
+    "video_id",
+    [
+        pytest.param(encode_video_id_with_provider("task-1", "kling", "kling-v3"), id="provider-without-cancel"),
+        pytest.param(encode_video_id_with_provider("task-1", "seegen", "not-a-video-model"), id="no-video-config"),
+    ],
+)
+def test_video_cancel_without_a_provider_cancel_is_unsupported_and_sends_nothing(video_id):
+    import httpx
+
+    from litellm.llms.custom_httpx.http_handler import HTTPHandler
+    from litellm.types.videos.main import VideoCancelRefusal
+
+    requests = []
+
+    def record(request):
+        requests.append(request)
+        return httpx.Response(500, request=request)
+
+    client = HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(record)))
+
+    result = videos_main.video_cancel(video_id=video_id, client=client)
+
+    assert isinstance(result, VideoCancelRefusal)
+    assert result.reason == "unsupported"
+    assert requests == []

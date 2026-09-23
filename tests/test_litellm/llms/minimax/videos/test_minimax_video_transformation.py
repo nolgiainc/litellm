@@ -5,6 +5,7 @@ import pytest
 
 import litellm
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
+from litellm.llms.custom_httpx.http_handler import HTTPHandler
 from litellm.llms.minimax.videos.transformation import MinimaxVideoConfig
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.utils import (
@@ -1010,3 +1011,83 @@ class TestMinimaxVideoTransformation:
 
         config = ProviderConfigManager.get_provider_video_config(model=V2_MODEL, provider=litellm.LlmProviders.MINIMAX)
         assert isinstance(config, MinimaxVideoConfig)
+
+
+MINIMAX_CANCEL_ID = encode_video_id_with_provider("424", "minimax", "MiniMax-H3")
+
+
+def _minimax_cancel_client(task_status, cancel_response):
+    calls = []
+
+    def route(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, str(request.url)))
+        if request.method == "GET" and str(request.url) == f"{API_BASE}/v2/query/video_generation/424":
+            return httpx.Response(200, json={"task": {"id": "424", "status": task_status}}, request=request)
+        if request.method == "DELETE" and str(request.url) == f"{API_BASE}/v2/video_generation/424":
+            status_code, body = cancel_response
+            return httpx.Response(status_code, json=body, request=request)
+        return httpx.Response(599, request=request)
+
+    return calls, HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(route)))
+
+
+def test_minimax_v2_cancel_of_a_queued_task_is_not_billed():
+    calls, client = _minimax_cancel_client(
+        "queued", (200, {"task_id": "424", "action": "cancelled", "status": "cancelled"})
+    )
+
+    result = litellm.video_cancel(video_id=MINIMAX_CANCEL_ID, api_key="mm-key", client=client)
+
+    assert result.model_dump(exclude_none=True) == {
+        "id": MINIMAX_CANCEL_ID,
+        "object": "video",
+        "status": "cancelled",
+        "cancel_outcome": "cancelled",
+        "provider_status": "queued",
+    }
+    assert [method for method, _ in calls] == ["GET", "DELETE"]
+
+
+@pytest.mark.parametrize(
+    ("task_status", "cancel_response", "reason", "methods"),
+    [
+        # The same DELETE deletes a finished task's record, so it is only ever sent for a queued task.
+        pytest.param("running", (200, {}), "too_late", ["GET"], id="running"),
+        pytest.param("succeeded", (200, {}), "too_late", ["GET"], id="succeeded"),
+        pytest.param("failed", (200, {}), "too_late", ["GET"], id="failed"),
+        pytest.param(
+            "queued",
+            (400, {"error": {"type": "bad_request_error", "message": "task is running"}}),
+            "too_late",
+            ["GET", "DELETE"],
+            id="started-before-the-delete",
+        ),
+        pytest.param(
+            "queued",
+            (200, {"task_id": "424", "action": "deleted", "status": "deleted"}),
+            "too_late",
+            ["GET", "DELETE"],
+            id="finished-before-the-delete",
+        ),
+    ],
+)
+def test_minimax_v2_cancel_refused(task_status, cancel_response, reason, methods):
+    calls, client = _minimax_cancel_client(task_status, cancel_response)
+
+    result = litellm.video_cancel(video_id=MINIMAX_CANCEL_ID, api_key="mm-key", client=client)
+
+    assert result.reason == reason
+    assert [method for method, _ in calls] == methods
+
+
+def test_minimax_legacy_hailuo_cancel_is_unsupported_without_a_call():
+    calls, client = _minimax_cancel_client("queued", (200, {}))
+
+    result = litellm.video_cancel(
+        video_id=encode_video_id_with_provider("424", "minimax", "MiniMax-Hailuo"),
+        api_key="mm-key",
+        client=client,
+    )
+
+    assert result.reason == "unsupported"
+    assert calls == []

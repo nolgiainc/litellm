@@ -1,6 +1,7 @@
 """Video generation and management functions for LiteLLM."""
 
 from .main import (
+    avideo_cancel,
     avideo_content,
     avideo_create_character,
     avideo_edit,
@@ -10,6 +11,7 @@ from .main import (
     avideo_list,
     avideo_remix,
     avideo_status,
+    video_cancel,
     video_content,
     video_create_character,
     video_edit,
@@ -22,6 +24,7 @@ from .main import (
 )
 
 __all__ = [
+    "avideo_cancel",
     "avideo_content",
     "avideo_create_character",
     "avideo_edit",
@@ -31,6 +34,7 @@ __all__ = [
     "avideo_list",
     "avideo_remix",
     "avideo_status",
+    "video_cancel",
     "video_content",
     "video_create_character",
     "video_edit",

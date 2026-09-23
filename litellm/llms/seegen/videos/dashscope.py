@@ -10,11 +10,28 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.types.router import GenericLiteLLMParams
-from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
+from litellm.types.videos.main import (
+    VideoCancelAccepted,
+    VideoCancelPreflight,
+    VideoCancelProceed,
+    VideoCancelRefusal,
+    VideoCancelRequest,
+    VideoCancelVerdict,
+    VideoCreateOptionalRequestParams,
+    VideoObject,
+)
 from litellm.types.videos.utils import encode_video_id_with_provider
 from litellm.videos.capabilities import CapabilityParamSupport, DeclaredCapabilityParams
 
-from ..common_utils import EMPTY_HEADERS, EMPTY_JSON_OBJECT, JsonValue, SeeGenError, parse_headers, parse_json_mapping
+from ..common_utils import (
+    EMPTY_HEADERS,
+    EMPTY_JSON_OBJECT,
+    JsonValue,
+    SeeGenError,
+    error_from_http_response,
+    parse_headers,
+    parse_json_mapping,
+)
 from .base import SeeGenVideoConfig
 from .dashscope_parameters import (
     STANDARD_PARAMS,
@@ -30,6 +47,19 @@ _TASK_PATH: Final = "/api/v1/tasks"
 _STRING_LIST_ADAPTER: Final = TypeAdapter(list[str])
 _JSON_LIST_ADAPTER: Final = TypeAdapter(list[JsonValue])
 _EMPTY_REQUEST_FILES: Final = TypeAdapter(list[tuple[str, str]]).validate_python(())
+_JSON_MAPPING_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
+_UNSUPPORTED_OPERATION: Final = "UnsupportedOperation"
+_CANCEL_NOT_FOUND: Final = VideoCancelRefusal(reason="not_found", message="SeeGen has no task with this id")
+
+
+def _is_unsupported_operation(response: httpx.Response) -> bool:
+    try:
+        payload: Final = _JSON_MAPPING_ADAPTER.validate_json(response.content)
+    except ValidationError:
+        return False
+    error: Final = payload.get("error")
+    nested_code: Final = error.get("code") if isinstance(error, dict) else None
+    return _UNSUPPORTED_OPERATION in (payload.get("code"), error, nested_code)
 
 
 class _DashOutput(BaseModel):
@@ -240,6 +270,54 @@ class SeeGenDashScopeVideoConfig(SeeGenVideoConfig):
         variant: str | None = None,
     ) -> tuple[str, dict[str, JsonValue]]:  # mutable-ok: BaseVideoConfig requires a dict query
         return self.transform_video_status_retrieve_request(video_id, api_base, litellm_params, headers)
+
+    def transform_video_cancel_request(
+        self,
+        video_id: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+    ) -> VideoCancelRequest:
+        task_id: Final = self._remember_video_model(video_id)
+        task_url: Final = f"{api_base.rstrip('/')}{_TASK_PATH}/{self._encoded_task_id(task_id)}"
+        return VideoCancelRequest(status_url=task_url, cancel_method="POST", cancel_url=f"{task_url}/cancel")
+
+    def transform_video_cancel_status_response(self, raw_response: httpx.Response) -> VideoCancelPreflight:
+        if raw_response.status_code == 404:
+            return _CANCEL_NOT_FOUND
+        task_status: Final = self._parse_response(raw_response).output.task_status
+        match task_status:
+            case "PENDING":
+                return VideoCancelProceed(VideoCancelAccepted(outcome="cancelled", provider_status=task_status))
+            case "CANCELED":
+                return VideoCancelAccepted(outcome="cancelled", provider_status=task_status)
+            case "UNKNOWN":
+                return _CANCEL_NOT_FOUND
+            case _:
+                return VideoCancelRefusal(
+                    reason="too_late",
+                    message=f"SeeGen task is {task_status} and can no longer be cancelled",
+                )
+
+    def transform_video_cancel_response(
+        self,
+        raw_response: httpx.Response,
+        proceed: VideoCancelProceed,
+    ) -> VideoCancelVerdict:
+        # DashScope cancels PENDING tasks through POST /api/v1/tasks/{id}/cancel; SeeGen does not
+        # document passing that route through, so a missing route reads as no cancel API.
+        if raw_response.is_success:
+            return proceed.if_accepted
+        if raw_response.status_code in (404, 405):
+            return VideoCancelRefusal(
+                reason="unsupported",
+                message="SeeGen does not expose task cancellation for this model",
+            )
+        if raw_response.status_code == 400 and _is_unsupported_operation(raw_response):
+            return VideoCancelRefusal(
+                reason="too_late",
+                message="SeeGen task left the queue before the cancel arrived",
+            )
+        raise error_from_http_response(raw_response)
 
     def _extract_video_url(self, payload: Mapping[str, JsonValue]) -> str:
         try:

@@ -1,7 +1,9 @@
-from typing import Any, Literal
+import builtins
+from dataclasses import dataclass
+from typing import Any, Literal, TypeAlias
 
 from openai.types.audio.transcription_create_params import FileTypes
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 from typing_extensions import ReadOnly, TypedDict
 
 
@@ -141,3 +143,70 @@ class VideoExtensionRequestParams(TypedDict, total=False):
     prompt: str
     seconds: str
     video: dict[str, str]  # {"id": "video_123"}
+
+
+VideoCancelOutcome: TypeAlias = Literal["cancelled", "requested", "partial"]
+"""What an accepted cancel means for billing.
+
+cancelled: the provider stopped the task before it started processing, so it is not billed.
+requested: the provider accepted a stop signal for a task that was already processing; it may still
+finish and bill.
+partial: the provider stopped a task mid-render and bills it pro rata by ``progress``.
+"""
+
+VideoCancelRefusalReason: TypeAlias = Literal["too_late", "not_found", "unsupported"]
+
+
+class VideoCancelObject(BaseModel):
+    """A cancel the provider accepted. ``progress`` (0..1) is set only for a ``partial`` outcome."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    object: Literal["video"] = "video"
+    status: Literal["cancelled"] = "cancelled"
+    cancel_outcome: VideoCancelOutcome
+    provider_status: str
+    progress: float | None = None
+    _hidden_params: dict[str, builtins.object] = PrivateAttr(default_factory=dict)  # mutable-ok: call metadata
+
+
+class VideoCancelRefusal(BaseModel):
+    """A cancel the provider did not accept. Returned as a value so the router neither retries nor cools down on it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    reason: VideoCancelRefusalReason
+    message: str
+    _hidden_params: dict[str, object] = PrivateAttr(default_factory=dict)  # mutable-ok: call metadata
+
+
+VideoCancelResult: TypeAlias = VideoCancelObject | VideoCancelRefusal
+
+
+@dataclass(frozen=True, slots=True)
+class VideoCancelRequest:
+    """Where a provider's task status is read and how its cancel is sent."""
+
+    status_url: str
+    cancel_method: Literal["PUT", "DELETE", "POST"]
+    cancel_url: str
+    recheck_url: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VideoCancelAccepted:
+    outcome: VideoCancelOutcome
+    provider_status: str
+    progress: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VideoCancelProceed:
+    """The status read allows a cancel; ``if_accepted`` is the result when the provider takes it."""
+
+    if_accepted: VideoCancelAccepted
+
+
+VideoCancelVerdict: TypeAlias = VideoCancelAccepted | VideoCancelRefusal
+VideoCancelPreflight: TypeAlias = VideoCancelProceed | VideoCancelVerdict

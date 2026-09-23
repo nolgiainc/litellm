@@ -8,7 +8,14 @@ from httpx._types import FileContent, RequestFiles
 
 from litellm.types.responses.main import *
 from litellm.types.router import GenericLiteLLMParams
-from litellm.types.videos.main import VideoCreateOptionalRequestParams
+from litellm.types.videos.main import (
+    VideoCancelAccepted,
+    VideoCancelPreflight,
+    VideoCancelProceed,
+    VideoCancelRequest,
+    VideoCancelVerdict,
+    VideoCreateOptionalRequestParams,
+)
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as _LiteLLMLoggingObj
@@ -344,6 +351,39 @@ class BaseVideoConfig(ABC):
         logging_obj: LiteLLMLoggingObj,
     ) -> VideoObject:
         pass
+
+    def transform_video_cancel_request(
+        self,
+        video_id: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+    ) -> VideoCancelRequest:
+        """
+        Where to read the task's status and how to send its cancel. The handler reads the status
+        first because what an accepted cancel means for billing depends on the state it lands in.
+
+        Deleting a finished video is a different contract (transform_video_delete_request).
+        """
+        raise NotImplementedError("video cancel is not supported for this provider")
+
+    def transform_video_cancel_status_response(self, raw_response: httpx.Response) -> VideoCancelPreflight:
+        """Decide from the status read whether to send the cancel at all."""
+        raise NotImplementedError("video cancel is not supported for this provider")
+
+    def transform_video_cancel_response(
+        self,
+        raw_response: httpx.Response,
+        proceed: VideoCancelProceed,
+    ) -> VideoCancelVerdict:
+        raise NotImplementedError("video cancel is not supported for this provider")
+
+    def transform_video_cancel_recheck_response(
+        self,
+        raw_response: httpx.Response,
+        accepted: VideoCancelAccepted,
+    ) -> VideoCancelAccepted:
+        """Only called when the request set a recheck_url and the cancel was accepted as `cancelled`."""
+        return accepted
 
     @abstractmethod
     def transform_video_status_retrieve_request(
