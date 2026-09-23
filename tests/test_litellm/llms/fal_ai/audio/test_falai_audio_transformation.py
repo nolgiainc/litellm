@@ -400,3 +400,88 @@ def test_provider_config_manager_returns_fal_ai_audio_config():
         model=ELEVEN_V3, provider=LlmProviders.FAL_AI
     )
     assert isinstance(config, FalAIAudioConfig)
+
+
+OFFLINE_FAL_BASE = "https://queue.fal.test"
+MINIMAX_MUSIC = "fal_ai/fal-ai/minimax-music/v2.6"
+MINIMAX_MUSIC_REQUEST = f"{OFFLINE_FAL_BASE}/fal-ai/minimax-music/requests/rid-422"
+PROMPT_TOO_LONG_DETAIL = {
+    "detail": [
+        {
+            "loc": ["body", "prompt"],
+            "msg": "String should have at most 2000 characters",
+            "type": "string_too_long",
+        }
+    ]
+}
+
+
+class TestFalAIAudioResultErrors:
+    @pytest.fixture(autouse=True)
+    def _httpx_transport(self, monkeypatch):
+        import litellm
+
+        monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+        litellm.in_memory_llm_clients_cache.flush_cache()
+        yield
+        litellm.in_memory_llm_clients_cache.flush_cache()
+
+    def _route_queue(self, respx_mock, result: httpx.Response):
+        submit = respx_mock.post(f"{OFFLINE_FAL_BASE}/fal-ai/minimax-music/v2.6").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "request_id": "rid-422",
+                    "status_url": f"{MINIMAX_MUSIC_REQUEST}/status",
+                    "response_url": MINIMAX_MUSIC_REQUEST,
+                },
+            )
+        )
+        respx_mock.get(f"{MINIMAX_MUSIC_REQUEST}/status").mock(
+            return_value=httpx.Response(200, json={"status": "COMPLETED"})
+        )
+        respx_mock.get(MINIMAX_MUSIC_REQUEST).mock(return_value=result)
+        return submit
+
+    def _router(self):
+        import litellm
+
+        return litellm.Router(
+            model_list=[
+                {
+                    "model_name": "music-minimax-v2.6",
+                    "litellm_params": {
+                        "model": MINIMAX_MUSIC,
+                        "api_key": "fal-test-key",
+                        "api_base": OFFLINE_FAL_BASE,
+                    },
+                }
+            ],
+            num_retries=2,
+            retry_after=0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_fal_validation_error_is_a_bad_request_with_the_detail_and_no_retry(self, respx_mock):
+        import litellm
+
+        submit: Final = self._route_queue(respx_mock, httpx.Response(422, json=PROMPT_TOO_LONG_DETAIL))
+
+        with pytest.raises(litellm.BadRequestError) as caught:
+            await self._router().aspeech(model="music-minimax-v2.6", input="x" * 2100, voice="")
+
+        assert caught.value.status_code == 422
+        assert "String should have at most 2000 characters" in str(caught.value)
+        assert "string_too_long" in str(caught.value)
+        assert submit.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fal_server_error_on_the_result_is_still_retried(self, respx_mock):
+        import litellm
+
+        submit: Final = self._route_queue(respx_mock, httpx.Response(500, text="upstream exploded"))
+
+        with pytest.raises(litellm.APIConnectionError):
+            await self._router().aspeech(model="music-minimax-v2.6", input="a calm piano piece", voice="")
+
+        assert submit.call_count == 3
