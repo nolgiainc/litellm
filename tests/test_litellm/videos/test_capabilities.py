@@ -100,6 +100,9 @@ SILENTLY_DROPPED_BEFORE = (
     # statement available says 2.5/2.6/3.0 do not honor negative_prompt. Its fal twin
     # does publish the field, which is why they differ.
     (KlingVideoConfig(), "kling/kling-v3", "negative_prompt", "blurry, low quality"),
+    # Gemini refuses referenceImages on Veo 3.1 Lite ("isn't supported by this model",
+    # NOL-826); the siblings take up to three.
+    (GeminiVideoConfig(), "veo-3.1-lite-generate-preview", "image_urls", ["https://example.com/a.png"]),
 )
 
 
@@ -116,6 +119,11 @@ def test_unsupported_capability_param_is_refused_not_dropped(config, model, para
 # (config, model, params) the provider does execute; refusing these would be a
 # regression that breaks working generations.
 EXECUTED_CAPABILITIES = (
+    # Veo 3.1 and Veo 3.1 Fast render reference images (probed on prod, NOL-826); Lite
+    # keeps its start frame.
+    (GeminiVideoConfig(), "veo-3.1-generate-preview", {"image_urls": ["https://example.com/a.png"]}),
+    (GeminiVideoConfig(), "veo-3.1-fast-generate-preview", {"image_urls": ["https://example.com/a.png"]}),
+    (GeminiVideoConfig(), "veo-3.1-lite-generate-preview", {"input_reference": "https://example.com/s.png"}),
     (XAIVideoConfig(), "grok-imagine-video-1.5", {"reference_audios": [{"voice_id": "eve"}]}),
     (XAIVideoConfig(), "grok-imagine-video-1.5", {"image_urls": ["https://example.com/a.png"]}),
     (XAIVideoConfig(), "grok-imagine-video-1.5", {"input_reference": "https://example.com/s.png"}),

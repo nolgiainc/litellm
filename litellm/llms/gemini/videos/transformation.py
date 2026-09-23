@@ -246,6 +246,10 @@ _CAPABILITY_PARAMS = frozenset(
     )
 )
 
+_VEO_LITE_MODEL: Final = re.compile(r"veo-3\.1-lite")
+
+_VEO_LITE_CAPABILITY_PARAMS: Final = _CAPABILITY_PARAMS - frozenset(("image_urls",))
+
 
 def _operation_url(video_id: str, api_base: str) -> str:
     return f"{api_base.rstrip('/')}/v1beta/{extract_original_video_id(video_id)}"
@@ -309,9 +313,15 @@ class GeminiVideoConfig(BaseVideoConfig):
 
         It has no end-frame, reference-video, reference-audio, regeneration or
         bitrate surface.
+
+        Veo 3.1 Lite takes no reference images: Gemini answers "`referenceImages` isn't
+        supported by this model" (NOL-826, probed 2026-09-23), so image_urls is not
+        declared for it and the gate refuses it here instead.
         """
         from litellm.videos.capabilities import DeclaredCapabilityParams
 
+        if _VEO_LITE_MODEL.search(model.lower()):
+            return DeclaredCapabilityParams(_VEO_LITE_CAPABILITY_PARAMS)
         return DeclaredCapabilityParams(_CAPABILITY_PARAMS)
 
     def get_supported_openai_params(self, model: str) -> list:
