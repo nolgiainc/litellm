@@ -221,7 +221,7 @@ class FalAIAudioConfig(BaseTextToSpeechConfig):
         )
 
         result_resp = client.get(url=response_url, headers=headers)
-        result_resp.raise_for_status()
+        self._raise_for_fal_status(result_resp)
         audio_url = self._extract_audio_url(result_resp.json())
 
         binary_resp = client.get(url=audio_url)
@@ -231,6 +231,15 @@ class FalAIAudioConfig(BaseTextToSpeechConfig):
         if duration is not None:
             result._hidden_params = {"audio_output_duration": duration}
         return result
+
+    def _raise_for_fal_status(self, resp: httpx.Response) -> None:
+        if 400 <= resp.status_code < 500:
+            raise self.get_error_class(
+                error_message=resp.text,
+                status_code=resp.status_code,
+                headers=dict(resp.headers),
+            )
+        resp.raise_for_status()
 
     @staticmethod
     def _resolve_polling_timeout(timeout: float | httpx.Timeout) -> float:
@@ -268,7 +277,7 @@ class FalAIAudioConfig(BaseTextToSpeechConfig):
             if time.monotonic() > deadline:
                 raise TimeoutError(f"fal.ai audio job did not complete within {timeout_secs}s")
             resp = client.get(url=status_url, headers=headers)
-            resp.raise_for_status()
+            self._raise_for_fal_status(resp)
             status = (resp.json().get("status") or "").upper()
             if status == _TERMINAL_OK:
                 return
