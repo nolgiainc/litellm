@@ -549,6 +549,7 @@ async def test_ensure_initialize_azure_sdk_client_always_used(call_type):
         or call_type == CallTypes.avideo_get_character
         or call_type == CallTypes.avideo_edit
         or call_type == CallTypes.avideo_extension
+        or call_type == CallTypes.avideo_cancel
     ):
         # Skip video call types as they don't use Azure SDK client initialization
         pytest.skip(
