@@ -833,8 +833,8 @@ API_ROUTE_TO_CALL_TYPES: Final[Mapping[str, Sequence[CallTypes]]] = {
     ],
     "/videos/{video_id}/remix": [CallTypes.avideo_remix, CallTypes.video_remix],
     "/v1/videos/{video_id}/remix": [CallTypes.avideo_remix, CallTypes.video_remix],
-    "/videos/{video_id}/cancel": [CallTypes.avideo_cancel, CallTypes.video_cancel],
-    "/v1/videos/{video_id}/cancel": [CallTypes.avideo_cancel, CallTypes.video_cancel],
+    "/videos/{video_id}/cancel": (CallTypes.avideo_cancel, CallTypes.video_cancel),
+    "/v1/videos/{video_id}/cancel": (CallTypes.avideo_cancel, CallTypes.video_cancel),
     "/videos/characters": [
         CallTypes.avideo_create_character,
         CallTypes.video_create_character,

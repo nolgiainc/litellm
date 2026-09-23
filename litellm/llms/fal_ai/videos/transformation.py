@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 import httpx
 from httpx._types import RequestFiles
+from pydantic import JsonValue, TypeAdapter, ValidationError
 from typing_extensions import assert_never
 
 import litellm
@@ -269,12 +270,14 @@ def _parse_queue_state(payload: Mapping[str, object]) -> _QueueState:
 _FAL_CANCEL_NOT_FOUND: Final = VideoCancelRefusal(reason="not_found", message="fal.ai has no request with this id")
 
 
-def _json_mapping(raw_response: httpx.Response) -> Mapping[str, object] | None:
+_JSON_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
+
+
+def _json_mapping(raw_response: httpx.Response) -> Mapping[str, JsonValue] | None:
     try:
-        payload: Final[object] = raw_response.json()
-    except (ValueError, JSONDecodeError):
+        return _JSON_OBJECT.validate_json(raw_response.content)
+    except ValidationError:
         return None
-    return payload if isinstance(payload, Mapping) else None
 
 
 def _fal_queue_status(payload: Mapping[str, object] | None) -> str:

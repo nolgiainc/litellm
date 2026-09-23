@@ -8761,11 +8761,8 @@ class BaseLLMHTTPHandler:
         if isinstance(prepared, VideoCancelRefusal):
             return prepared
         request, headers = prepared
-        sync_client: Final = (
-            client
-            if isinstance(client, HTTPHandler)
-            else _get_httpx_client(params={"ssl_verify": litellm_params.get("ssl_verify", None)})
-        )
+        client_params: Final = {"ssl_verify": litellm_params.get("ssl_verify")}  # mutable-ok: factory takes a dict
+        sync_client: Final = client if isinstance(client, HTTPHandler) else _get_httpx_client(params=client_params)
         try:
             preflight: Final = video_cancel_provider_config.transform_video_cancel_status_response(
                 sync_client.get(url=request.status_url, headers=headers, timeout=timeout)
@@ -8781,7 +8778,7 @@ class BaseLLMHTTPHandler:
                 ),
                 preflight,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  # re-mapped by the provider's error class, like every video handler
             raise self._handle_error(e=e, provider_config=video_cancel_provider_config)
         if (
             request.recheck_url is None
@@ -8815,13 +8812,11 @@ class BaseLLMHTTPHandler:
         if isinstance(prepared, VideoCancelRefusal):
             return prepared
         request, headers = prepared
+        client_params: Final = {"ssl_verify": litellm_params.get("ssl_verify")}  # mutable-ok: factory takes a dict
         async_client: Final = (
             client
             if isinstance(client, AsyncHTTPHandler)
-            else get_async_httpx_client(
-                llm_provider=litellm.LlmProviders(custom_llm_provider),
-                params={"ssl_verify": litellm_params.get("ssl_verify", None)},
-            )
+            else get_async_httpx_client(llm_provider=litellm.LlmProviders(custom_llm_provider), params=client_params)
         )
         try:
             preflight: Final = video_cancel_provider_config.transform_video_cancel_status_response(
@@ -8840,7 +8835,7 @@ class BaseLLMHTTPHandler:
                 ),
                 preflight,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  # re-mapped by the provider's error class, like every video handler
             raise self._handle_error(e=e, provider_config=video_cancel_provider_config)
         if (
             request.recheck_url is None
@@ -8868,7 +8863,7 @@ class BaseLLMHTTPHandler:
         api_base: Final = video_cancel_provider_config.get_complete_url(
             model="",
             api_base=litellm_params.get("api_base", None),
-            litellm_params=dict(litellm_params),
+            litellm_params=dict(litellm_params),  # mutable-ok: get_complete_url takes a dict
         )
         try:
             request: Final = video_cancel_provider_config.transform_video_cancel_request(
@@ -8878,19 +8873,19 @@ class BaseLLMHTTPHandler:
             )
         except NotImplementedError as e:
             return VideoCancelRefusal(reason="unsupported", message=str(e))
-        headers: Final = {
+        headers: Final = {  # mutable-ok: httpx sends dict headers
             **video_cancel_provider_config.validate_environment(
                 api_key=None,
-                headers=dict(extra_headers or {}),
+                headers=dict(extra_headers or {}),  # mutable-ok: validate_environment fills a dict
                 model="",
                 litellm_params=litellm_params,
             ),
-            **(extra_headers or {}),
+            **(extra_headers or {}),  # mutable-ok: empty default for the optional caller headers
         }
         logging_obj.pre_call(
             input="",
             api_key="",
-            additional_args={
+            additional_args={  # mutable-ok: the logging API takes a dict
                 "api_base": request.cancel_url,
                 "headers": headers,
                 "video_id": video_id,

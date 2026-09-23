@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import httpx
 from httpx._types import RequestFiles
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 import litellm
 from litellm.litellm_core_utils.prompt_templates.common_utils import extract_file_data
@@ -139,17 +140,19 @@ _SIZE_TO_ASPECT_RATIO: Mapping[str, str] = MappingProxyType(
 _CANCEL_NOT_FOUND: Final = VideoCancelRefusal(reason="not_found", message="MiniMax has no video task with this id")
 
 
-def _json_field(raw_response: httpx.Response, key: str) -> object:
+_JSON_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
+
+
+def _json_field(raw_response: httpx.Response, key: str) -> JsonValue:
     try:
-        payload: Final[object] = raw_response.json()
-    except (ValueError, JSONDecodeError):
+        return _JSON_OBJECT.validate_json(raw_response.content).get(key)
+    except ValidationError:
         return None
-    return payload.get(key) if isinstance(payload, Mapping) else None
 
 
 def _v2_task_status(raw_response: httpx.Response) -> str:
     task: Final = _json_field(raw_response, "task")
-    status: Final = task.get("status") if isinstance(task, Mapping) else None
+    status: Final = task.get("status") if isinstance(task, dict) else None
     return status.lower() if isinstance(status, str) else ""
 
 

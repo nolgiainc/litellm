@@ -1,3 +1,4 @@
+import builtins
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
@@ -167,9 +168,7 @@ class VideoCancelObject(BaseModel):
     cancel_outcome: VideoCancelOutcome
     provider_status: str
     progress: float | None = None
-    _hidden_params: dict[str, object] = PrivateAttr(  # mutable-ok: the client wrapper stamps call metadata here
-        default_factory=dict
-    )
+    _hidden_params: dict[str, builtins.object] = PrivateAttr(default_factory=dict)  # mutable-ok: call metadata
 
 
 class VideoCancelRefusal(BaseModel):
@@ -179,9 +178,7 @@ class VideoCancelRefusal(BaseModel):
 
     reason: VideoCancelRefusalReason
     message: str
-    _hidden_params: dict[str, object] = PrivateAttr(  # mutable-ok: the client wrapper stamps call metadata here
-        default_factory=dict
-    )
+    _hidden_params: dict[str, object] = PrivateAttr(default_factory=dict)  # mutable-ok: call metadata
 
 
 VideoCancelResult: TypeAlias = VideoCancelObject | VideoCancelRefusal

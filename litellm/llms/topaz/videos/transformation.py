@@ -11,6 +11,7 @@ from urllib.parse import unquote
 
 import httpx
 from httpx._types import RequestFiles
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 import litellm
 from litellm.constants import MAX_VIDEO_URL_DOWNLOAD_SIZE_MB
@@ -203,8 +204,8 @@ TOPAZ_STATUS_MAP: Mapping[str, str] = MappingProxyType(
 )
 
 TOPAZ_TERMINAL_FAILURES = frozenset(("canceled", "failed"))
-TOPAZ_QUEUED_STATUSES = frozenset(("requested", "accepted"))
-TOPAZ_RENDERING_STATUSES = frozenset(("initializing", "preprocessing", "processing", "postprocessing"))
+TOPAZ_QUEUED_STATUSES: Final = frozenset(("requested", "accepted"))
+TOPAZ_RENDERING_STATUSES: Final = frozenset(("initializing", "preprocessing", "processing", "postprocessing"))
 
 SOURCE_CONTAINERS = frozenset(("mp4", "mov", "mkv"))
 
@@ -292,12 +293,14 @@ def _progress_percent(value: object) -> int | None:
     return int(percent)
 
 
-def _json_mapping(raw_response: httpx.Response) -> Mapping[str, object]:
+_JSON_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
+
+
+def _json_mapping(raw_response: httpx.Response) -> Mapping[str, JsonValue]:
     try:
-        payload: Final[object] = raw_response.json()
-    except (ValueError, JSONDecodeError):
+        return _JSON_OBJECT.validate_json(raw_response.content)
+    except ValidationError:
         return MappingProxyType({})
-    return payload if isinstance(payload, Mapping) else MappingProxyType({})
 
 
 def _source_too_large(size_bytes: int, model: str) -> Exception:

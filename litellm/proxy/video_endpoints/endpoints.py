@@ -1,6 +1,7 @@
 #### Video Endpoints #####
 
 from collections.abc import AsyncIterator, Mapping
+from enum import Enum
 from types import MappingProxyType
 from typing import Final
 
@@ -34,7 +35,7 @@ from litellm.types.videos.utils import (
 router: Final = APIRouter()
 
 _VIDEO_ROUTE_DEPENDENCIES = [Depends(user_api_key_auth)]  # mutable-ok: FastAPI's decorator contract takes a list
-_VIDEO_ROUTE_TAGS = ["videos"]  # mutable-ok: FastAPI's decorator contract takes a list
+_VIDEO_ROUTE_TAGS: Final[list[str | Enum]] = ["videos"]  # mutable-ok: FastAPI's decorator contract takes a list
 # Module-level singleton so the auth default is not a call in an argument default.
 _VIDEO_ROUTE_AUTH = Depends(user_api_key_auth)
 
@@ -1078,28 +1079,25 @@ def _video_cancel_body(result: object, fastapi_response: Response) -> object:
     if not isinstance(result, VideoCancelRefusal):
         return result
     status_code, code = _VIDEO_CANCEL_REFUSALS[result.reason]
-    fastapi_response.status_code = status_code
-    return {"error": {"message": result.message, "type": "invalid_request_error", "param": None, "code": code}}
+    fastapi_response.status_code = status_code  # rebind-ok: FastAPI takes the refusal's status from this response
+    return {  # mutable-ok: FastAPI serializes the returned body
+        "error": {  # mutable-ok: FastAPI serializes the returned body
+            "message": result.message,
+            "type": "invalid_request_error",
+            "param": None,
+            "code": code,
+        },
+    }
 
 
-@router.post(
-    "/v1/videos/{video_id}/cancel",
-    dependencies=_VIDEO_ROUTE_DEPENDENCIES,
-    response_class=ORJSONResponse,
-    tags=_VIDEO_ROUTE_TAGS,
-)
-@router.post(
-    "/videos/{video_id}/cancel",
-    dependencies=_VIDEO_ROUTE_DEPENDENCIES,
-    response_class=ORJSONResponse,
-    tags=_VIDEO_ROUTE_TAGS,
-)
+@router.post("/v1/videos/{video_id}/cancel", dependencies=_VIDEO_ROUTE_DEPENDENCIES, tags=_VIDEO_ROUTE_TAGS)
+@router.post("/videos/{video_id}/cancel", dependencies=_VIDEO_ROUTE_DEPENDENCIES, tags=_VIDEO_ROUTE_TAGS)
 async def video_cancel(
     video_id: str,
     request: Request,
     fastapi_response: Response,
     user_api_key_dict: UserAPIKeyAuth = _VIDEO_ROUTE_AUTH,
-):
+) -> object:
     """
     Cancel a video render at its provider.
 
@@ -1144,13 +1142,17 @@ async def video_cancel(
     )
     processor: Final = ProxyBaseLLMRequestProcessing(
         data={  # mutable-ok: the processor mutates its request data dictionary
-            "video_id": video_id,
-            "custom_llm_provider": custom_llm_provider,
-            **({"model": resolved_model} if resolved_model else {}),
+            key: value
+            for key, value in (
+                ("video_id", video_id),
+                ("custom_llm_provider", custom_llm_provider),
+                ("model", resolved_model),
+            )
+            if value
         }
     )
     try:
-        result: Final[object] = await processor.base_process_llm_request(
+        result: Final[object] = await processor.base_process_llm_request(  # pyright: ignore[reportAny]  # untyped
             request=request,
             fastapi_response=fastapi_response,
             user_api_key_dict=user_api_key_dict,
@@ -1168,8 +1170,8 @@ async def video_cancel(
             user_api_base=user_api_base,
             version=version,
         )
-    except Exception as e:
-        raise await processor._handle_llm_api_exception(
+    except Exception as e:  # noqa: BLE001  # rendered by the proxy's error path, like every video route
+        raise await processor._handle_llm_api_exception(  # pyright: ignore[reportPrivateUsage]  # shared error path
             e=e,
             user_api_key_dict=user_api_key_dict,
             proxy_logging_obj=proxy_logging_obj,
