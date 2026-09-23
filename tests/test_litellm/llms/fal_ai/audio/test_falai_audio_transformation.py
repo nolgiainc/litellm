@@ -485,3 +485,96 @@ class TestFalAIAudioResultErrors:
             await self._router().aspeech(model="music-minimax-v2.6", input="a calm piano piece", voice="")
 
         assert submit.call_count == 3
+
+
+SLOW_JOB_REQUEST = f"{OFFLINE_FAL_BASE}/fal-ai/minimax-music/requests/rid-slow"
+SLOW_JOB_AUDIO = "https://fal.media.test/files/slow/output.mp3"
+SLOW_JOB_POLLS = 10
+SLOW_JOB_POLL_INTERVAL_SECS = 0.1
+CHAT_DELAY_SECS = 0.2
+
+
+class TestFalAIAudioAsyncPollKeepsTheEventLoopFree:
+    @pytest.fixture(autouse=True)
+    def _httpx_transport(self, monkeypatch):
+        import litellm
+
+        monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+        monkeypatch.setattr(
+            "litellm.llms.fal_ai.audio.transformation._POLL_INTERVAL_SECS", SLOW_JOB_POLL_INTERVAL_SECS
+        )
+        litellm.in_memory_llm_clients_cache.flush_cache()
+        yield
+        litellm.in_memory_llm_clients_cache.flush_cache()
+
+    def _route_slow_job(self, respx_mock):
+        respx_mock.post(f"{OFFLINE_FAL_BASE}/fal-ai/minimax-music/v2.6").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "request_id": "rid-slow",
+                    "status_url": f"{SLOW_JOB_REQUEST}/status",
+                    "response_url": SLOW_JOB_REQUEST,
+                },
+            )
+        )
+        status = respx_mock.get(f"{SLOW_JOB_REQUEST}/status").mock(
+            side_effect=[httpx.Response(200, json={"status": "IN_PROGRESS"})] * SLOW_JOB_POLLS
+            + [httpx.Response(200, json={"status": "COMPLETED"})]
+        )
+        respx_mock.get(SLOW_JOB_REQUEST).mock(return_value=httpx.Response(200, json={"audio": {"url": SLOW_JOB_AUDIO}}))
+        respx_mock.get(SLOW_JOB_AUDIO).mock(return_value=httpx.Response(200, content=b"slow-audio-bytes"))
+        return status
+
+    def _router(self):
+        import litellm
+
+        return litellm.Router(
+            model_list=[
+                {
+                    "model_name": "music-minimax-v2.6",
+                    "litellm_params": {
+                        "model": MINIMAX_MUSIC,
+                        "api_key": "fal-test-key",
+                        "api_base": OFFLINE_FAL_BASE,
+                    },
+                },
+                {
+                    "model_name": "chat",
+                    "litellm_params": {"model": "openai/gpt-5-mini", "api_key": "sk-test", "mock_response": "pong"},
+                },
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_chat_request_is_not_held_up_by_a_slow_fal_audio_job(self, respx_mock):
+        import asyncio
+
+        status: Final = self._route_slow_job(respx_mock)
+        router: Final = self._router()
+        loop: Final = asyncio.get_running_loop()
+
+        started: Final = loop.time()
+        wanted_at: Final = started + CHAT_DELAY_SECS
+
+        async def chat_mid_job() -> tuple[str | None, float, int]:
+            await asyncio.sleep(wanted_at - loop.time())
+            chat: Final = await router.acompletion(model="chat", messages=[{"role": "user", "content": "ping"}])
+            return chat.choices[0].message.content, loop.time() - wanted_at, status.call_count
+
+        audio_task: Final = asyncio.create_task(
+            router.aspeech(model="music-minimax-v2.6", input="a slow piano piece", voice="")
+        )
+        reply, chat_latency, polls_when_chat_answered = await asyncio.create_task(chat_mid_job())
+        audio: Final = await audio_task
+        audio_secs: Final = loop.time() - started
+
+        assert audio.response.content == b"slow-audio-bytes"
+        assert status.call_count == SLOW_JOB_POLLS + 1
+        assert audio_secs >= SLOW_JOB_POLLS * SLOW_JOB_POLL_INTERVAL_SECS
+        assert reply == "pong"
+        assert 0 < polls_when_chat_answered <= SLOW_JOB_POLLS, (
+            f"the chat answered after {polls_when_chat_answered} of {SLOW_JOB_POLLS + 1} status polls, "
+            f"{chat_latency:.2f}s late, so it waited for the audio job ({audio_secs:.2f}s)"
+        )
+        assert chat_latency < audio_secs / 3
