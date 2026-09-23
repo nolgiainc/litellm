@@ -237,7 +237,7 @@ class FalAIAudioConfig(BaseTextToSpeechConfig):
             raise self.get_error_class(
                 error_message=resp.text,
                 status_code=resp.status_code,
-                headers=dict(resp.headers),
+                headers=dict(resp.headers),  # mutable-ok: BaseTextToSpeechConfig.get_error_class requires a dict
             )
         resp.raise_for_status()
 
