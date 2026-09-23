@@ -1076,6 +1076,75 @@ def test_seedance_platform_i2v_payload_sends_a_single_first_frame() -> None:
     }
 
 
+SEEDANCE_20_MODEL = "dreamina-seedance-2-0-260128"
+
+
+def test_seedance_20_platform_4k_request_reaches_ark_as_lowercase_4k() -> None:
+    body, _, _ = _transform_create(
+        SeeGenSeedanceVideoConfig(SEEDANCE_20_MODEL),
+        SEEDANCE_20_MODEL,
+        "A night train crossing a bridge",
+        {
+            "aspect_ratio": "16:9",
+            "duration_seconds": 5,
+            "generate_audio": True,
+            "resolution": "4k",
+            "seconds": 5,
+            "user": PLATFORM_USER,
+        },
+        drop_params=True,
+    )
+
+    assert body["model"] == SEEDANCE_20_MODEL
+    assert body["resolution"] == "4k"
+    assert body["duration"] == 5
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["dreamina-seedance-2-0-260128", "doubao-seedance-2-0-260128", "nsfw-seedance-2-0"],
+)
+@pytest.mark.parametrize(
+    ("requested", "sent"),
+    [("480p", "480p"), ("720p", "720p"), ("1080p", "1080p"), ("4k", "4k"), ("4K", "4k")],
+)
+def test_seedance_20_sends_every_tier_in_arks_lowercase_spelling(model: str, requested: str, sent: str) -> None:
+    body, _, _ = _transform_create(
+        SeeGenSeedanceVideoConfig(model),
+        model,
+        "A quiet shoreline",
+        {"resolution": requested, "seconds": "5"},
+    )
+
+    assert body["resolution"] == sent
+
+
+@pytest.mark.parametrize(("size", "ratio"), [("3840x2160", "16:9"), ("2160x3840", "9:16")])
+def test_seedance_20_4k_sizes_resolve_to_lowercase_4k(size: str, ratio: str) -> None:
+    body, _, _ = _transform_create(
+        SeeGenSeedanceVideoConfig(SEEDANCE_20_MODEL),
+        SEEDANCE_20_MODEL,
+        "A quiet shoreline",
+        {"size": size, "seconds": "5"},
+    )
+
+    assert body["ratio"] == ratio
+    assert body["resolution"] == "4k"
+
+
+@pytest.mark.parametrize("resolution", ["2k", "2K"])
+def test_seedance_20_still_refuses_tiers_ark_does_not_list(resolution: str) -> None:
+    with pytest.raises(SeeGenError, match="Invalid resolution") as exc_info:
+        _transform_create(
+            SeeGenSeedanceVideoConfig(SEEDANCE_20_MODEL),
+            SEEDANCE_20_MODEL,
+            "A quiet shoreline",
+            {"resolution": resolution, "seconds": "5"},
+        )
+
+    assert exc_info.value.status_code == 400
+
+
 def test_public_video_generation_posts_platform_start_and_end_frames_without_a_reference() -> None:
     def route(request: httpx.Request) -> httpx.Response:
         assert json.loads(request.content) == {
