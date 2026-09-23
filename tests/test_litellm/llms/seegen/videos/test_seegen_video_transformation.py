@@ -1261,3 +1261,105 @@ def test_wan_input_reference_is_the_start_frame_outside_reference_mode(
     body, _, _ = _transform_create(SeeGenDashScopeVideoConfig(WAN_MODEL), WAN_MODEL, "prompt", params)
 
     assert body["input"]["media"] == expected_media
+
+
+SEEDANCE_20_MODELS = ("dreamina-seedance-2-0-260128", "doubao-seedance-2-0-260128", "nsfw-seedance-2-0")
+
+
+@pytest.mark.parametrize("model", SEEDANCE_20_MODELS)
+@pytest.mark.parametrize("aspect_ratio", ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"])
+@pytest.mark.parametrize(
+    ("media", "expected_media"),
+    [
+        ({}, []),
+        (
+            {"image_url": PLATFORM_START, "input_reference": PLATFORM_START},
+            [_ark_image(PLATFORM_START, "first_frame")],
+        ),
+        (
+            {"image_urls": [REFERENCE], "video_urls": [REFERENCE_VIDEO]},
+            [
+                _ark_image(REFERENCE, "reference_image"),
+                {"type": "video_url", "video_url": {"url": REFERENCE_VIDEO}, "role": "reference_video"},
+            ],
+        ),
+    ],
+    ids=["text", "image", "reference"],
+)
+def test_seedance_20_platform_request_sends_the_requested_aspect_ratio_as_ark_ratio(
+    model: str, aspect_ratio: str, media: dict[str, JsonValue], expected_media: list[dict[str, JsonValue]]
+) -> None:
+    body, _, _ = _transform_create(
+        SeeGenSeedanceVideoConfig(model),
+        model,
+        "A night train crossing a bridge",
+        {
+            "aspect_ratio": aspect_ratio,
+            "duration_seconds": 5,
+            "generate_audio": True,
+            "resolution": "720p",
+            "seconds": 5,
+            "user": PLATFORM_USER,
+            **media,
+        },
+        drop_params=True,
+    )
+
+    assert body == {
+        "model": model,
+        "content": [{"type": "text", "text": "A night train crossing a bridge"}, *expected_media],
+        "generate_audio": True,
+        "ratio": aspect_ratio,
+        "duration": 5,
+        "resolution": "720p",
+    }
+
+
+def test_public_video_generation_forwards_aspect_ratio_to_seedance_20_as_ratio() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["ratio"] == "9:16"
+        assert "aspect_ratio" not in body
+        return httpx.Response(200, json={"id": "cgt-ratio"}, request=request)
+
+    video = litellm.video_generation(
+        prompt="A lighthouse in a storm",
+        model=f"seegen/{SEEDANCE_20_MODEL}",
+        aspect_ratio="9:16",
+        resolution="720p",
+        seconds="5",
+        api_key="test-key",
+        client=HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(route))),
+        timeout=1,
+    )
+
+    assert decode_video_id_with_provider(video.id)["video_id"] == "cgt-ratio"
+
+
+@pytest.mark.parametrize(
+    ("params", "ratio"),
+    [
+        ({"aspect_ratio": "9:16", "ratio": "adaptive"}, "adaptive"),
+        ({"aspect_ratio": "9:16", "ratio": "1:1"}, "1:1"),
+        ({"aspect_ratio": "9:16", "size": "1920x1080"}, "16:9"),
+        ({"aspect_ratio": "1:1", "ratio": "9:16", "size": "1920x1080"}, "16:9"),
+    ],
+)
+def test_seedance_size_then_explicit_ratio_win_over_aspect_ratio(params: dict[str, JsonValue], ratio: str) -> None:
+    body, _, _ = _transform_create(SeeGenSeedanceVideoConfig(SEEDANCE_20_MODEL), SEEDANCE_20_MODEL, "prompt", params)
+
+    assert body["ratio"] == ratio
+    assert "aspect_ratio" not in body
+
+
+def test_seedance_refuses_an_aspect_ratio_ark_does_not_list() -> None:
+    with pytest.raises(SeeGenError, match="Invalid ratio") as exc_info:
+        _transform_create(
+            SeeGenSeedanceVideoConfig(SEEDANCE_20_MODEL),
+            SEEDANCE_20_MODEL,
+            "prompt",
+            {"aspect_ratio": "2:3", "resolution": "720p"},
+            drop_params=True,
+        )
+
+    assert exc_info.value.status_code == 400
