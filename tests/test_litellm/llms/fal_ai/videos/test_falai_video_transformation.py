@@ -1255,3 +1255,171 @@ class TestSeedanceReferenceToVideoCogs:
             for variant in ("reference-to-video", "text-to-video", "image-to-video")
         }
         assert len(set(costs.values())) == 1, f"seedance variants diverge: {costs}"
+
+
+# --------------------------------------------------------------------------- #
+# Cancel: status read first, PUT /requests/{id}/cancel only while cancellable. #
+# --------------------------------------------------------------------------- #
+
+KLING_I2V_MODEL_ID = "fal-ai/kling-video/v3/pro/image-to-video"
+CANCEL_VIDEO_ID = encode_video_id_with_provider("req-9", "fal_ai", KLING_I2V_MODEL_ID)
+CANCEL_REQUEST_URL = f"{FAL_API_BASE}/{KLING_QUEUE_NAMESPACE}/requests/req-9"
+
+
+def _fal_cancel_transport(status_responses, cancel_response):
+    """Serves the status reads in order and one cancel answer, recording every call."""
+    calls = []
+    statuses = iter(status_responses)
+
+    def route(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, str(request.url), request.headers.get("Authorization")))
+        if request.method == "GET" and str(request.url) == f"{CANCEL_REQUEST_URL}/status":
+            status_code, body = next(statuses)
+            return httpx.Response(status_code, json=body, request=request)
+        if request.method == "PUT" and str(request.url) == f"{CANCEL_REQUEST_URL}/cancel":
+            status_code, body = cancel_response
+            return httpx.Response(status_code, json=body, request=request)
+        return httpx.Response(599, json={"unexpected": str(request.url)}, request=request)
+
+    return calls, httpx.MockTransport(route)
+
+
+def test_fal_cancel_request_reads_and_cancels_on_the_queue_namespace():
+    # Queue status and cancel live under the owner/app namespace; the full model
+    # path answers 405, exactly as the status and content transforms already learned.
+    request = FalAIVideoConfig().transform_video_cancel_request(
+        video_id=CANCEL_VIDEO_ID,
+        api_base=FAL_API_BASE,
+        litellm_params=GenericLiteLLMParams(),
+    )
+
+    assert request.status_url == f"{CANCEL_REQUEST_URL}/status"
+    assert request.cancel_method == "PUT"
+    assert request.cancel_url == f"{CANCEL_REQUEST_URL}/cancel"
+    assert request.recheck_url == f"{CANCEL_REQUEST_URL}/status"
+
+
+@pytest.mark.parametrize(
+    ("statuses", "cancel_response", "expected", "expected_calls"),
+    [
+        pytest.param(
+            ((200, {"status": "IN_QUEUE"}), (200, {"status": "IN_QUEUE"})),
+            (202, {"status": "CANCELLATION_REQUESTED"}),
+            {"cancel_outcome": "cancelled", "provider_status": "IN_QUEUE"},
+            ("GET", "PUT", "GET"),
+            id="queued-is-removed-before-it-runs",
+        ),
+        pytest.param(
+            ((200, {"status": "IN_PROGRESS"}),),
+            (202, {"status": "CANCELLATION_REQUESTED"}),
+            {"cancel_outcome": "requested", "provider_status": "IN_PROGRESS"},
+            ("GET", "PUT"),
+            id="running-only-gets-a-stop-signal",
+        ),
+        pytest.param(
+            ((200, {"status": "IN_QUEUE"}), (200, {"status": "IN_PROGRESS"})),
+            (202, {"status": "CANCELLATION_REQUESTED"}),
+            {"cancel_outcome": "requested", "provider_status": "IN_PROGRESS"},
+            ("GET", "PUT", "GET"),
+            id="runner-claimed-it-between-read-and-cancel",
+        ),
+        pytest.param(
+            ((200, {"status": "IN_QUEUE"}), (500, {"detail": "status unavailable"})),
+            (202, {"status": "CANCELLATION_REQUESTED"}),
+            {"cancel_outcome": "cancelled", "provider_status": "IN_QUEUE"},
+            ("GET", "PUT", "GET"),
+            id="unreadable-recheck-keeps-the-confirmed-cancel",
+        ),
+    ],
+)
+def test_fal_cancel_accepted_outcomes(statuses, cancel_response, expected, expected_calls):
+    calls, transport = _fal_cancel_transport(statuses, cancel_response)
+
+    result = litellm.video_cancel(
+        video_id=CANCEL_VIDEO_ID,
+        api_key="fal-test-key",
+        client=HTTPHandler(client=httpx.Client(transport=transport)),
+    )
+
+    assert result.model_dump(exclude_none=True) == {
+        "id": CANCEL_VIDEO_ID,
+        "object": "video",
+        "status": "cancelled",
+        **expected,
+    }
+    assert tuple(method for method, _, _ in calls) == expected_calls
+    assert {auth for _, _, auth in calls} == {"Key fal-test-key"}
+
+
+@pytest.mark.parametrize(
+    ("statuses", "cancel_response", "reason", "expected_calls"),
+    [
+        pytest.param(
+            ((200, {"status": "COMPLETED"}),),
+            (202, {"status": "CANCELLATION_REQUESTED"}),
+            "too_late",
+            ("GET",),
+            id="completed-is-never-sent-a-cancel",
+        ),
+        pytest.param(
+            ((200, {"status": "IN_QUEUE"}),),
+            (400, {"status": "ALREADY_COMPLETED"}),
+            "too_late",
+            ("GET", "PUT"),
+            id="finished-before-the-cancel-arrived",
+        ),
+        pytest.param(
+            ((404, {"status": "NOT_FOUND"}),),
+            (202, {"status": "CANCELLATION_REQUESTED"}),
+            "not_found",
+            ("GET",),
+            id="unknown-request-on-the-status-read",
+        ),
+        pytest.param(
+            ((200, {"status": "IN_QUEUE"}),),
+            (404, {"status": "NOT_FOUND"}),
+            "not_found",
+            ("GET", "PUT"),
+            id="unknown-request-on-the-cancel",
+        ),
+    ],
+)
+def test_fal_cancel_refusals_are_values(statuses, cancel_response, reason, expected_calls):
+    calls, transport = _fal_cancel_transport(statuses, cancel_response)
+
+    result = litellm.video_cancel(
+        video_id=CANCEL_VIDEO_ID,
+        api_key="fal-test-key",
+        client=HTTPHandler(client=httpx.Client(transport=transport)),
+    )
+
+    assert result.reason == reason
+    assert tuple(method for method, _, _ in calls) == expected_calls
+
+
+def test_fal_cancel_surfaces_an_unexpected_cancel_failure_as_an_error():
+    _, transport = _fal_cancel_transport(((200, {"status": "IN_QUEUE"}),), (500, {"detail": "queue down"}))
+
+    with pytest.raises(litellm.InternalServerError) as exc_info:
+        litellm.video_cancel(
+            video_id=CANCEL_VIDEO_ID,
+            api_key="fal-test-key",
+            client=HTTPHandler(client=httpx.Client(transport=transport)),
+        )
+
+    assert exc_info.value.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_fal_async_cancel_downgrades_when_the_recheck_shows_the_render_started():
+    calls, transport = _fal_cancel_transport(
+        ((200, {"status": "IN_QUEUE"}), (200, {"status": "IN_PROGRESS"})),
+        (202, {"status": "CANCELLATION_REQUESTED"}),
+    )
+    client = AsyncHTTPHandler()
+    client.client = httpx.AsyncClient(transport=transport)
+
+    result = await litellm.avideo_cancel(video_id=CANCEL_VIDEO_ID, api_key="fal-test-key", client=client)
+
+    assert (result.cancel_outcome, result.provider_status) == ("requested", "IN_PROGRESS")
+    assert [method for method, _, _ in calls] == ["GET", "PUT", "GET"]

@@ -341,6 +341,8 @@ class LiteLLMRoutes(enum.Enum):
         "/v1/videos/{video_id}/content",
         "/videos/{video_id}/remix",
         "/v1/videos/{video_id}/remix",
+        "/videos/{video_id}/cancel",
+        "/v1/videos/{video_id}/cancel",
         # audio transcription
         "/audio/transcriptions",
         "/v1/audio/transcriptions",

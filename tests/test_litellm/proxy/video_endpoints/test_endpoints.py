@@ -44,6 +44,7 @@ from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessin
 from litellm.proxy.utils import ProxyLogging
 from litellm.proxy.video_endpoints import endpoints
 from litellm.router import Router
+from litellm.types.videos.main import VideoCancelObject, VideoCancelRefusal
 from litellm.types.videos.utils import (
     encode_character_id_with_provider,
     encode_video_id_with_provider,
@@ -864,6 +865,118 @@ async def test_extension__extracts_nested_video_id_full_contract(harness):
 
 
 # =========================================================================== #
+#   POST /v1/videos/{video_id}/cancel  -  video_cancel                        #
+# =========================================================================== #
+
+
+async def call_cancel(harness: Harness, video_id: str):
+    return await endpoints.video_cancel(
+        video_id=video_id,
+        request=FakeRequest(),
+        fastapi_response=Response(),
+        user_api_key_dict=_user(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel__routes_like_status_from_the_encoded_id(harness):
+    await call_cancel(harness, AZURE_VIDEO_ID)
+
+    assert harness.route_type() == "avideo_cancel"
+    assert harness.processor_data() == {
+        "video_id": AZURE_VIDEO_ID,
+        "custom_llm_provider": "azure",
+        "model": "azure-sora",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cancel__plain_id_defaults_to_openai_without_a_model(harness):
+    await call_cancel(harness, "video_plain")
+
+    assert harness.processor_data() == {"video_id": "video_plain", "custom_llm_provider": "openai"}
+
+
+@pytest.mark.asyncio
+async def test_cancel__provider_errors_go_through_the_proxy_error_handler(harness):
+    harness.base_process.side_effect = ValueError("provider down")
+
+    with pytest.raises(RuntimeError, match="handled"):
+        await call_cancel(harness, AZURE_VIDEO_ID)
+
+    assert harness.handle_exc.call_args.kwargs["e"].args[0] == "provider down"
+
+
+def _cancel_error(code: str, message: str) -> dict[str, Any]:
+    return {"error": {"message": message, "type": "invalid_request_error", "param": None, "code": code}}
+
+
+@pytest.mark.parametrize(
+    ("result", "status_code", "body"),
+    [
+        pytest.param(
+            VideoCancelObject(id=AZURE_VIDEO_ID, cancel_outcome="cancelled", provider_status="IN_QUEUE"),
+            200,
+            {
+                "id": AZURE_VIDEO_ID,
+                "object": "video",
+                "status": "cancelled",
+                "cancel_outcome": "cancelled",
+                "provider_status": "IN_QUEUE",
+            },
+            id="cancelled-omits-progress",
+        ),
+        pytest.param(
+            VideoCancelObject(id=AZURE_VIDEO_ID, cancel_outcome="partial", provider_status="processing", progress=0.4),
+            200,
+            {
+                "id": AZURE_VIDEO_ID,
+                "object": "video",
+                "status": "cancelled",
+                "cancel_outcome": "partial",
+                "provider_status": "processing",
+                "progress": 0.4,
+            },
+            id="partial-carries-progress",
+        ),
+        pytest.param(
+            VideoCancelRefusal(reason="too_late", message="already COMPLETED"),
+            409,
+            _cancel_error("video_cancel_too_late", "already COMPLETED"),
+            id="too-late",
+        ),
+        pytest.param(
+            VideoCancelRefusal(reason="not_found", message="no such request"),
+            404,
+            _cancel_error("video_cancel_not_found", "no such request"),
+            id="not-found",
+        ),
+        pytest.param(
+            VideoCancelRefusal(reason="unsupported", message="no cancel API"),
+            501,
+            _cancel_error("video_cancel_unsupported", "no cancel API"),
+            id="unsupported",
+        ),
+    ],
+)
+@pytest.mark.parametrize("path", ("/v1/videos/{video_id}/cancel", "/videos/{video_id}/cancel"))
+def test_cancel__maps_the_provider_answer_to_status_and_body(harness, path, result, status_code, body):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
+
+    harness.base_process.return_value = result
+    app: Final = FastAPI()
+    app.include_router(endpoints.router)
+    app.dependency_overrides[user_api_key_auth] = _user
+
+    response: Final = TestClient(app).post(path.format(video_id=AZURE_VIDEO_ID))
+
+    assert (response.status_code, response.json()) == (status_code, body)
+
+
+# =========================================================================== #
 #   Route registration order  -  literal paths vs /videos/{video_id}          #
 # =========================================================================== #
 
@@ -968,6 +1081,8 @@ def test_every_literal_video_route_still_resolves_to_its_own_handler():
         ("GET", "/v1/videos/video_abc", "video_status"),
         ("GET", "/v1/videos/video_abc/content", "video_content"),
         ("POST", "/v1/videos/video_abc/remix", "video_remix"),
+        ("POST", "/v1/videos/video_abc/cancel", "video_cancel"),
+        ("POST", "/videos/video_abc/cancel", "video_cancel"),
     )
 
     assert tuple((method, path, resolve(method, path)) for method, path, _ in expected) == expected

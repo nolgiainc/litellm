@@ -650,3 +650,74 @@ def test_model_discovery_lists_the_video_enhancement_models():
     assert "topaz/prob-4" in models
     assert "topaz/rhea-1" in models
     assert "topaz/Standard V2" in models
+
+
+TOPAZ_CANCEL_ID = encode_video_id_with_provider(REQUEST_ID, "topaz", MODEL)
+TOPAZ_REQUEST_URL = f"https://api.topazlabs.com/video/{REQUEST_ID}"
+
+
+def _topaz_cancel_client(status_response: tuple[int, object], cancel_status: int = 200):
+    calls: list[tuple[str, str, str | None]] = []
+
+    def route(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, str(request.url), request.headers.get("X-API-Key")))
+        if request.method == "GET" and str(request.url) == f"{TOPAZ_REQUEST_URL}/status":
+            status_code, body = status_response
+            return httpx.Response(status_code, json=body, request=request)
+        if request.method == "DELETE" and str(request.url) == TOPAZ_REQUEST_URL:
+            return httpx.Response(cancel_status, json={"message": "Request canceled"}, request=request)
+        return httpx.Response(599, request=request)
+
+    return calls, HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(route)))
+
+
+@pytest.mark.parametrize(
+    ("status_body", "expected"),
+    [
+        pytest.param(
+            {"status": "accepted"},
+            {"cancel_outcome": "cancelled", "provider_status": "accepted"},
+            id="queued-refunds-every-credit",
+        ),
+        pytest.param(
+            {"status": "processing", "progress": 42.5},
+            {"cancel_outcome": "partial", "provider_status": "processing", "progress": 0.425},
+            id="mid-render-refunds-by-progress",
+        ),
+        pytest.param(
+            {"status": "preprocessing"},
+            {"cancel_outcome": "partial", "provider_status": "preprocessing"},
+            id="mid-render-without-reported-progress",
+        ),
+    ],
+)
+def test_topaz_cancel_accepted(status_body: dict, expected: dict) -> None:
+    calls, client = _topaz_cancel_client((200, status_body))
+
+    result = litellm.video_cancel(video_id=TOPAZ_CANCEL_ID, api_key="topaz-key", client=client)
+
+    assert result.model_dump(exclude_none=True) == {
+        "id": TOPAZ_CANCEL_ID,
+        "object": "video",
+        "status": "cancelled",
+        **expected,
+    }
+    assert [(method, key) for method, _, key in calls] == [("GET", "topaz-key"), ("DELETE", "topaz-key")]
+
+
+@pytest.mark.parametrize(
+    ("status_response", "cancel_status", "reason", "methods"),
+    [
+        pytest.param((200, {"status": "complete"}), 200, "too_late", ["GET"], id="complete"),
+        pytest.param((200, {"status": "failed"}), 200, "too_late", ["GET"], id="failed"),
+        pytest.param((404, {"message": "Not Found"}), 200, "not_found", ["GET"], id="unknown-request"),
+        pytest.param((200, {"status": "requested"}), 404, "not_found", ["GET", "DELETE"], id="gone-before-the-delete"),
+    ],
+)
+def test_topaz_cancel_refused(status_response, cancel_status: int, reason: str, methods: list[str]) -> None:
+    calls, client = _topaz_cancel_client(status_response, cancel_status)
+
+    result = litellm.video_cancel(video_id=TOPAZ_CANCEL_ID, api_key="topaz-key", client=client)
+
+    assert result.reason == reason
+    assert [method for method, _, _ in calls] == methods

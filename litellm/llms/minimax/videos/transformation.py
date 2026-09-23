@@ -2,7 +2,7 @@ import base64
 from collections.abc import Mapping
 from json import JSONDecodeError
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any  # noqa: TID251  # base transformation contracts type these payloads as Any
+from typing import TYPE_CHECKING, Any, Final  # noqa: TID251  # base transformation contracts type these payloads as Any
 from urllib.parse import quote
 
 import httpx
@@ -27,7 +27,16 @@ from litellm.llms.minimax.common_utils import (
 )
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import FileTypes
-from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
+from litellm.types.videos.main import (
+    VideoCancelAccepted,
+    VideoCancelPreflight,
+    VideoCancelProceed,
+    VideoCancelRefusal,
+    VideoCancelRequest,
+    VideoCancelVerdict,
+    VideoCreateOptionalRequestParams,
+    VideoObject,
+)
 from litellm.types.videos.utils import (
     decode_video_id_with_provider,
     encode_video_id_with_provider,
@@ -125,6 +134,23 @@ _SIZE_TO_ASPECT_RATIO: Mapping[str, str] = MappingProxyType(
         "768x1024": "3:4",
     }
 )
+
+
+_CANCEL_NOT_FOUND: Final = VideoCancelRefusal(reason="not_found", message="MiniMax has no video task with this id")
+
+
+def _json_field(raw_response: httpx.Response, key: str) -> object:
+    try:
+        payload: Final[object] = raw_response.json()
+    except (ValueError, JSONDecodeError):
+        return None
+    return payload.get(key) if isinstance(payload, Mapping) else None
+
+
+def _v2_task_status(raw_response: httpx.Response) -> str:
+    task: Final = _json_field(raw_response, "task")
+    status: Final = task.get("status") if isinstance(task, Mapping) else None
+    return status.lower() if isinstance(status, str) else ""
 
 
 def _uses_legacy_video_api(model: str | None) -> bool:
@@ -788,6 +814,60 @@ class MinimaxVideoConfig(BaseVideoConfig):
         custom_llm_provider: str | None = None,
     ) -> dict[str, str]:  # mutable-ok: BaseVideoConfig contract returns dict
         raise NotImplementedError("Video listing is not supported for MiniMax")
+
+    def transform_video_cancel_request(
+        self,
+        video_id: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+    ) -> VideoCancelRequest:
+        task_id, model_name = self._decode_task(video_id)
+        if _uses_legacy_video_api(model_name):
+            raise NotImplementedError("Video cancel is not supported for the legacy MiniMax Hailuo API")
+        encoded: Final = encode_url_path_segment(task_id, field_name="video_id")
+        return VideoCancelRequest(
+            status_url=f"{api_base}/v2/query/video_generation/{encoded}",
+            cancel_method="DELETE",
+            cancel_url=f"{api_base}{_GENERATION_PATH}/{encoded}",
+        )
+
+    def transform_video_cancel_status_response(self, raw_response: httpx.Response) -> VideoCancelPreflight:
+        # The same DELETE deletes the record of a finished task, so it is sent for a queued task alone.
+        if raw_response.status_code == 404:
+            return _CANCEL_NOT_FOUND
+        self._raise_for_status(raw_response)
+        status: Final = _v2_task_status(raw_response)
+        match status:
+            case "queued":
+                return VideoCancelProceed(VideoCancelAccepted(outcome="cancelled", provider_status=status))
+            case "cancelled":
+                return VideoCancelAccepted(outcome="cancelled", provider_status=status)
+            case _:
+                return VideoCancelRefusal(
+                    reason="too_late",
+                    message=f"MiniMax task is {status or 'in an unknown state'} and can no longer be cancelled",
+                )
+
+    def transform_video_cancel_response(
+        self,
+        raw_response: httpx.Response,
+        proceed: VideoCancelProceed,
+    ) -> VideoCancelVerdict:
+        if raw_response.status_code == 404:
+            return _CANCEL_NOT_FOUND
+        if raw_response.status_code == 400:
+            return VideoCancelRefusal(
+                reason="too_late",
+                message=f"MiniMax refused the cancel: {self._error_message_from_body(raw_response)}",
+            )
+        self._raise_for_status(raw_response)
+        action: Final = _json_field(raw_response, "action")
+        if action == "cancelled":
+            return proceed.if_accepted
+        return VideoCancelRefusal(
+            reason="too_late",
+            message=f"MiniMax answered the cancel with action {action!r}; the task had already left the queue",
+        )
 
     def transform_video_delete_request(
         self,

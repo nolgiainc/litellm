@@ -1,6 +1,6 @@
 #### Video Endpoints #####
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from types import MappingProxyType
 from typing import Final
 
@@ -25,6 +25,7 @@ from litellm.proxy.video_endpoints.utils import (
     get_custom_provider_from_data,
     video_reference_to_id,
 )
+from litellm.types.videos.main import VideoCancelObject, VideoCancelRefusal, VideoCancelRefusalReason
 from litellm.types.videos.utils import (
     decode_character_id_with_provider,
     decode_video_id_with_provider,
@@ -1060,3 +1061,118 @@ async def video_remix(
             proxy_logging_obj=proxy_logging_obj,
             version=version,
         )
+
+
+_VIDEO_CANCEL_REFUSALS: Final[Mapping[VideoCancelRefusalReason, tuple[int, str]]] = MappingProxyType(
+    {
+        "too_late": (409, "video_cancel_too_late"),
+        "not_found": (404, "video_cancel_not_found"),
+        "unsupported": (501, "video_cancel_unsupported"),
+    }
+)
+
+
+def _video_cancel_body(result: object, fastapi_response: Response) -> object:
+    if isinstance(result, VideoCancelObject):
+        return result.model_dump(exclude_none=True)
+    if not isinstance(result, VideoCancelRefusal):
+        return result
+    status_code, code = _VIDEO_CANCEL_REFUSALS[result.reason]
+    fastapi_response.status_code = status_code
+    return {"error": {"message": result.message, "type": "invalid_request_error", "param": None, "code": code}}
+
+
+@router.post(
+    "/v1/videos/{video_id}/cancel",
+    dependencies=_VIDEO_ROUTE_DEPENDENCIES,
+    response_class=ORJSONResponse,
+    tags=_VIDEO_ROUTE_TAGS,
+)
+@router.post(
+    "/videos/{video_id}/cancel",
+    dependencies=_VIDEO_ROUTE_DEPENDENCIES,
+    response_class=ORJSONResponse,
+    tags=_VIDEO_ROUTE_TAGS,
+)
+async def video_cancel(
+    video_id: str,
+    request: Request,
+    fastapi_response: Response,
+    user_api_key_dict: UserAPIKeyAuth = _VIDEO_ROUTE_AUTH,
+):
+    """
+    Cancel a video render at its provider.
+
+    200 carries `cancel_outcome`: `cancelled` (stopped before processing, not billed), `requested`
+    (a stop signal reached a render already in progress, which may still finish and bill) or
+    `partial` (stopped mid-render, billed pro rata by `progress`). 409 `video_cancel_too_late`,
+    404 `video_cancel_not_found` and 501 `video_cancel_unsupported` mean nothing was stopped.
+
+    Example:
+    ```bash
+    curl -X POST "http://localhost:4000/v1/videos/video_123/cancel" \
+        -H "Authorization: Bearer sk-1234"
+    ```
+    """
+    from litellm.proxy.proxy_server import (
+        general_settings,
+        llm_router,
+        proxy_config,
+        proxy_logging_obj,
+        select_data_generator,
+        user_api_base,
+        user_max_tokens,
+        user_model,
+        user_request_timeout,
+        user_temperature,
+        version,
+    )
+
+    decoded: Final = decode_video_id_with_provider(video_id)
+    model_id_from_decoded: Final = decoded.get("model_id")
+    custom_llm_provider: Final = (
+        get_custom_llm_provider_from_request_headers(request=request)
+        or get_custom_llm_provider_from_request_query(request=request)
+        or await get_custom_llm_provider_from_request_body(request=request)
+        or decoded.get("custom_llm_provider")
+        or "openai"
+    )
+    resolved_model: Final = (
+        llm_router.resolve_model_name_from_model_id(model_id_from_decoded)
+        if model_id_from_decoded and llm_router
+        else None
+    )
+    processor: Final = ProxyBaseLLMRequestProcessing(
+        data={  # mutable-ok: the processor mutates its request data dictionary
+            "video_id": video_id,
+            "custom_llm_provider": custom_llm_provider,
+            **({"model": resolved_model} if resolved_model else {}),
+        }
+    )
+    try:
+        result: Final[object] = await processor.base_process_llm_request(
+            request=request,
+            fastapi_response=fastapi_response,
+            user_api_key_dict=user_api_key_dict,
+            route_type="avideo_cancel",
+            proxy_logging_obj=proxy_logging_obj,
+            llm_router=llm_router,
+            general_settings=general_settings,
+            proxy_config=proxy_config,
+            select_data_generator=select_data_generator,
+            model=None,
+            user_model=user_model,
+            user_temperature=user_temperature,
+            user_request_timeout=user_request_timeout,
+            user_max_tokens=user_max_tokens,
+            user_api_base=user_api_base,
+            version=version,
+        )
+    except Exception as e:
+        raise await processor._handle_llm_api_exception(
+            e=e,
+            user_api_key_dict=user_api_key_dict,
+            proxy_logging_obj=proxy_logging_obj,
+            version=version,
+        )
+    return _video_cancel_body(result, fastapi_response)

@@ -12641,3 +12641,56 @@ def test_get_configured_mode_returns_none_for_unset_blank_or_unknown(model_info)
 
     assert router.get_configured_mode("plain-model") is None
     assert router.get_configured_mode("unknown-model") is None
+
+
+@pytest.mark.asyncio
+async def test_router_video_cancel_uses_the_deployment_key_and_never_retries_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A provider saying "too late" is an answer, not a failure: retrying it would re-read the
+    task for nothing and count toward cooling the deployment down."""
+    import respx
+
+    from litellm.types.videos.utils import encode_video_id_with_provider
+
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    litellm.in_memory_llm_clients_cache.flush_cache()
+    model_id: Final = "fal-ai/kling-video/v3/pro/image-to-video"
+    seen: Final[list[tuple[str, str, str | None]]] = []
+    statuses: Final = iter(("IN_QUEUE", "IN_QUEUE", "COMPLETED"))
+
+    def route(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("Authorization")))
+        if request.method == "PUT":
+            return httpx.Response(202, json={"status": "CANCELLATION_REQUESTED"})
+        return httpx.Response(200, json={"status": next(statuses)})
+
+    router: Final = Router(
+        model_list=[
+            {
+                "model_name": "fal-kling",
+                "litellm_params": {
+                    "model": f"fal_ai/{model_id}",
+                    "api_key": "deployment-key",
+                    "api_base": "http://127.0.0.1:9",
+                },
+            }
+        ],
+        num_retries=3,
+    )
+    video_id: Final = encode_video_id_with_provider("req-1", "fal_ai", model_id)
+
+    with respx.mock(assert_all_called=False) as respx_mock:
+        respx_mock.route(host="127.0.0.1").mock(side_effect=route)
+        accepted: Final = await router.avideo_cancel(video_id=video_id, model="fal-kling")
+        refused: Final = await router.avideo_cancel(video_id=video_id, model="fal-kling")
+
+    status_path: Final = "/fal-ai/kling-video/requests/req-1/status"
+    assert (accepted.cancel_outcome, accepted.provider_status) == ("cancelled", "IN_QUEUE")
+    assert refused.reason == "too_late"
+    assert seen == [
+        ("GET", status_path, "Key deployment-key"),
+        ("PUT", "/fal-ai/kling-video/requests/req-1/cancel", "Key deployment-key"),
+        ("GET", status_path, "Key deployment-key"),
+        ("GET", status_path, "Key deployment-key"),
+    ]

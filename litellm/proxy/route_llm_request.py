@@ -93,6 +93,7 @@ ROUTE_ENDPOINT_MAPPING: Final = {
     "avideo_generation": "/videos",
     "avideo_list": "/videos",
     "avideo_status": "/videos/{video_id}",
+    "avideo_cancel": "/videos/{video_id}/cancel",
     "avideo_content": "/videos/{video_id}/content",
     "avideo_remix": "/videos/{video_id}/remix",
     "avideo_create_character": "/videos/characters",
@@ -372,6 +373,7 @@ RouteType = Literal[
     "avideo_generation",
     "avideo_list",
     "avideo_status",
+    "avideo_cancel",
     "avideo_content",
     "avideo_remix",
     "avideo_create_character",
@@ -608,6 +610,7 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
         if route_type in [
             "avideo_list",
             "avideo_status",
+            "avideo_cancel",
             "avideo_content",
             "avideo_remix",
             "avideo_create_character",
@@ -682,6 +685,7 @@ async def _route_request_single_attempt(  # noqa: ANN202  # returns unawaited pr
                 return getattr(llm_router, f"{route_type}")(**data)
             elif route_type in [
                 "avideo_status",
+                "avideo_cancel",
                 "avideo_content",
                 "avideo_remix",
                 "avideo_create_character",

@@ -31,7 +31,16 @@ from litellm.llms.topaz.common_utils import TOPAZ_VIDEO_MODELS, TopazException, 
 from litellm.llms.topaz.cost_calculator import cost_calculator as topaz_cost_calculator
 from litellm.llms.topaz.video_geometry import SourceGeometry, parse_video_geometry
 from litellm.types.router import GenericLiteLLMParams
-from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
+from litellm.types.videos.main import (
+    VideoCancelAccepted,
+    VideoCancelPreflight,
+    VideoCancelProceed,
+    VideoCancelRefusal,
+    VideoCancelRequest,
+    VideoCancelVerdict,
+    VideoCreateOptionalRequestParams,
+    VideoObject,
+)
 from litellm.types.videos.utils import encode_video_id_with_provider, extract_original_video_id
 from litellm.videos.capabilities import CapabilityParamSupport, DeclaredCapabilityParams
 
@@ -194,6 +203,8 @@ TOPAZ_STATUS_MAP: Mapping[str, str] = MappingProxyType(
 )
 
 TOPAZ_TERMINAL_FAILURES = frozenset(("canceled", "failed"))
+TOPAZ_QUEUED_STATUSES = frozenset(("requested", "accepted"))
+TOPAZ_RENDERING_STATUSES = frozenset(("initializing", "preprocessing", "processing", "postprocessing"))
 
 SOURCE_CONTAINERS = frozenset(("mp4", "mov", "mkv"))
 
@@ -210,6 +221,8 @@ RESOLUTION_ALIASES: Mapping[str, tuple[int, int]] = MappingProxyType(
 )
 
 UPSCALE_MODEL_CODES = TOPAZ_VIDEO_MODELS
+
+_CANCEL_NOT_FOUND: Final = VideoCancelRefusal(reason="not_found", message="Topaz has no video request with this id")
 
 
 def resolve_topaz_api_base(api_base: str | None) -> str:
@@ -277,6 +290,14 @@ def _progress_percent(value: object) -> int | None:
     if percent is None:
         return None
     return int(percent)
+
+
+def _json_mapping(raw_response: httpx.Response) -> Mapping[str, object]:
+    try:
+        payload: Final[object] = raw_response.json()
+    except (ValueError, JSONDecodeError):
+        return MappingProxyType({})
+    return payload if isinstance(payload, Mapping) else MappingProxyType({})
 
 
 def _source_too_large(size_bytes: int, model: str) -> Exception:
@@ -1127,6 +1148,54 @@ class TopazVideoConfig(BaseVideoConfig):
         custom_llm_provider: str | None = None,
     ) -> dict:  # mutable-ok: BaseVideoConfig contract returns dict
         raise NotImplementedError("Video list is not supported by the Topaz Labs API")
+
+    def transform_video_cancel_request(
+        self,
+        video_id: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+    ) -> VideoCancelRequest:
+        request_id: Final = encode_url_path_segment(extract_original_video_id(video_id), field_name="video_id")
+        request_url: Final = f"{resolve_topaz_api_base(api_base)}/video/{request_id}"
+        return VideoCancelRequest(
+            status_url=f"{request_url}/status",
+            cancel_method="DELETE",
+            cancel_url=request_url,
+        )
+
+    def transform_video_cancel_status_response(self, raw_response: httpx.Response) -> VideoCancelPreflight:
+        # Topaz refunds every reserved credit for a job cancelled before processing starts and
+        # refunds by progress for one cancelled mid-render.
+        if raw_response.status_code == 404:
+            return _CANCEL_NOT_FOUND
+        self._raise_for_status(raw_response)
+        payload: Final = _json_mapping(raw_response)
+        status: Final = str(payload.get("status") or "")
+        if status in TOPAZ_QUEUED_STATUSES:
+            return VideoCancelProceed(VideoCancelAccepted(outcome="cancelled", provider_status=status))
+        if status in TOPAZ_RENDERING_STATUSES:
+            percent: Final = _safe_float(payload.get("progress"))
+            return VideoCancelProceed(
+                VideoCancelAccepted(
+                    outcome="partial",
+                    provider_status=status,
+                    progress=None if percent is None else min(max(percent / 100, 0.0), 1.0),
+                )
+            )
+        return VideoCancelRefusal(
+            reason="too_late",
+            message=f"Topaz request is {status or 'in an unknown state'} and can no longer be cancelled",
+        )
+
+    def transform_video_cancel_response(
+        self,
+        raw_response: httpx.Response,
+        proceed: VideoCancelProceed,
+    ) -> VideoCancelVerdict:
+        if raw_response.status_code == 404:
+            return _CANCEL_NOT_FOUND
+        self._raise_for_status(raw_response)
+        return proceed.if_accepted
 
     def transform_video_delete_request(
         self,

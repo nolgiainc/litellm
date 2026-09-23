@@ -457,6 +457,8 @@ class CallTypes(str, Enum):
     avideo_retrieve_job = "avideo_retrieve_job"
     video_delete = "video_delete"
     avideo_delete = "avideo_delete"
+    video_cancel = "video_cancel"
+    avideo_cancel = "avideo_cancel"
     video_create_character = "video_create_character"
     avideo_create_character = "avideo_create_character"
     video_get_character = "video_get_character"
@@ -831,6 +833,8 @@ API_ROUTE_TO_CALL_TYPES: Final[Mapping[str, Sequence[CallTypes]]] = {
     ],
     "/videos/{video_id}/remix": [CallTypes.avideo_remix, CallTypes.video_remix],
     "/v1/videos/{video_id}/remix": [CallTypes.avideo_remix, CallTypes.video_remix],
+    "/videos/{video_id}/cancel": [CallTypes.avideo_cancel, CallTypes.video_cancel],
+    "/v1/videos/{video_id}/cancel": [CallTypes.avideo_cancel, CallTypes.video_cancel],
     "/videos/characters": [
         CallTypes.avideo_create_character,
         CallTypes.video_create_character,
