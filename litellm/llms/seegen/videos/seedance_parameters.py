@@ -85,18 +85,27 @@ def resolve_size(size: str) -> tuple[str, str]:
     return exact
 
 
-def _size_params(params: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+def _wire_resolution(model: str, resolution: JsonValue) -> JsonValue:
+    """Ark spells the Seedance 2.0 tiers in lowercase (`4k`), so either case from the caller is sent lowercase."""
+    if model in SEEDANCE_STANDARD_20_MODELS and isinstance(resolution, str):
+        return resolution.lower()
+    return resolution
+
+
+def _size_params(params: Mapping[str, JsonValue], model: str) -> Mapping[str, JsonValue]:
     size: Final = params.get("size")
     if size is not None:
         if not isinstance(size, str):
             raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
         ratio, resolution = resolve_size(size)
-        return MappingProxyType({"ratio": ratio, "resolution": resolution})
+        return MappingProxyType({"ratio": ratio, "resolution": _wire_resolution(model, resolution)})
     ratio_params: Final[Mapping[str, JsonValue]] = (
         MappingProxyType({"ratio": params["ratio"]}) if "ratio" in params else EMPTY_JSON_OBJECT
     )
     resolution_params: Final[Mapping[str, JsonValue]] = (
-        MappingProxyType({"resolution": params["resolution"]}) if "resolution" in params else EMPTY_JSON_OBJECT
+        MappingProxyType({"resolution": _wire_resolution(model, params["resolution"])})
+        if "resolution" in params
+        else EMPTY_JSON_OBJECT
     )
     return MappingProxyType({**ratio_params, **resolution_params})
 
@@ -139,7 +148,7 @@ def map_seedance_params(
         if "duration" in selected
         else EMPTY_JSON_OBJECT
     )
-    size_params: Final = _size_params(selected)
+    size_params: Final = _size_params(selected, normalized_model)
     transformed: Final = frozenset({"seconds", "duration", "size", "ratio", "resolution"})
     retained: Final[Mapping[str, JsonValue]] = MappingProxyType(
         {key: value for key, value in selected.items() if key not in transformed}
@@ -185,7 +194,7 @@ def _validate_options(model: str, params: Mapping[str, JsonValue]) -> None:
     allowed_resolutions: Final = (
         frozenset({"480p", "720p", "1080p", "2K", "4K"})
         if model in SEEDANCE_25_MODELS
-        else frozenset({"480p", "720p", "1080p", "4K"})
+        else frozenset({"480p", "720p", "1080p", "4k"})
         if model in SEEDANCE_STANDARD_20_MODELS
         else frozenset({"480p", "720p"})
     )
