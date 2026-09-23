@@ -1714,6 +1714,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         )
 
         setattr(model_response, "usage", usage)
+        model_response._hidden_params["vertex_ai_prompt_feedback"] = completion_response.get("promptFeedback")  # pyright: ignore[reportPrivateUsage]  # rebind-ok: hidden params have no public setter; the speech bridge reads the block reason from here
 
         return model_response
 
@@ -1748,6 +1749,9 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         )
 
         setattr(model_response, "usage", usage)
+        blocked_candidates: Final = completion_response.get("candidates") or ()
+        blocked_candidate: Final = blocked_candidates[0] if blocked_candidates else None
+        model_response._hidden_params["vertex_ai_blocked_candidate"] = blocked_candidate  # pyright: ignore[reportPrivateUsage]  # rebind-ok: hidden params have no public setter; the speech bridge reads the finish reason from here
 
         return model_response
 
