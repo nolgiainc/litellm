@@ -3164,6 +3164,26 @@ async def test_aspeech_gemini_bridge_keeps_proxy_metadata_for_spend_tracking(
     assert speech_event.logged_response_cost == pytest.approx(expected_cost)
 
 
+@pytest.mark.asyncio
+async def test_aspeech_generates_a_gemini_bridge_response_once(
+    respx_mock: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    generate_content: Final = respx_mock.post(
+        url__regex=r"https://generativelanguage\.googleapis\.com/v1beta/models/gemini-2\.5-flash-preview-tts:generateContent.*"
+    ).mock(return_value=httpx.Response(200, json=_gemini_tts_generate_content_response()))
+
+    speech: Final = await litellm.aspeech(
+        model="gemini/gemini-2.5-flash-preview-tts",
+        input="one generation per request",
+        voice="Kore",
+        api_key="fake-gemini-key",
+    )
+
+    assert speech.response.content
+    assert generate_content.call_count == 1
+
+
 def _stream_builder_text_chunk(model: str, content: str, finish_reason: str | None = None) -> ModelResponseStream:
     return ModelResponseStream(
         id="chatcmpl-cost",
