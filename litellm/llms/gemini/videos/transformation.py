@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import re
 from collections.abc import Mapping
@@ -10,7 +11,7 @@ import litellm
 from litellm.constants import DEFAULT_GOOGLE_VIDEO_DURATION_SECONDS
 from litellm.images.utils import ImageEditRequestUtils
 from litellm.litellm_core_utils.token_counter import get_image_type
-from litellm.litellm_core_utils.url_utils import safe_get
+from litellm.litellm_core_utils.url_utils import async_safe_get, safe_get
 from litellm.llms.base_llm.videos.transformation import BaseVideoConfig
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.gemini import (
@@ -148,8 +149,56 @@ def fetch_image_as_base64(image_url: str) -> tuple[str, str]:
     response: httpx.Response = safe_get(  # pyright: ignore[reportAny]  # safe_get is declared Any-in/Any-out; it returns the httpx response
         litellm.module_level_client, image_url
     )
+    return _base64_image(response)
+
+
+async def async_fetch_image_as_base64(image_url: str) -> tuple[str, str]:
+    """fetch_image_as_base64 for the async request path, where a sync download would block the event loop"""
+    response: httpx.Response = await async_safe_get(  # pyright: ignore[reportAny]  # async_safe_get is declared Any-in/Any-out; it returns the httpx response
+        litellm.module_level_aclient, image_url
+    )
+    return _base64_image(response)
+
+
+def _base64_image(response: httpx.Response) -> tuple[str, str]:
     response.raise_for_status()
     return base64.b64encode(response.content).decode("utf-8"), _image_mime_type_from_response(response)
+
+
+def _start_image_url(params: Mapping[str, object]) -> str | None:
+    """
+    The start-frame URL a Veo create request must download: an ``image`` that is an http(s) URL
+    wins over ``image_url``, and any other ``image`` (an inline dict or a file) needs no download
+    """
+    image: Final = params.get("image")
+    if isinstance(image, str):
+        if not image.startswith(("http://", "https://")):
+            raise ValueError(
+                "Unsupported string image input for Gemini video generation; "
+                f"expected an http(s) image URL, got: {image[:100]}"
+            )
+        return image
+    if image is not None:
+        return None
+    image_url: Final = params.get("image_url")
+    if not image_url:
+        return None
+    if not isinstance(image_url, str):
+        raise TypeError("image_url for Gemini video generation must be an http(s) URL string")
+    return image_url
+
+
+def _reference_image_urls(params: Mapping[str, object]) -> tuple[str, ...]:
+    image_urls: Final = params.get("image_urls")
+    if not image_urls:
+        return ()
+    if not isinstance(image_urls, (list, tuple)):
+        raise TypeError("image_urls for Gemini video generation must be a list of http(s) URL strings")
+    candidates: Final[tuple[object, ...]] = tuple(image_urls)[:_MAX_REFERENCE_IMAGES]  # pyright: ignore[reportUnknownArgumentType]  # OpenAI-shaped video params are untyped at this boundary
+    urls: Final = tuple(url for url in candidates if isinstance(url, str) and url)
+    if len(urls) != sum(1 for url in candidates if url):
+        raise ValueError("image_urls for Gemini video generation must be a list of http(s) URL strings")
+    return urls
 
 
 def _convert_image_to_gemini_format(image_file) -> dict[str, str]:
@@ -196,6 +245,31 @@ _CAPABILITY_PARAMS = frozenset(
         "negative_prompt",
     )
 )
+
+
+def _operation_url(video_id: str, api_base: str) -> str:
+    return f"{api_base.rstrip('/')}/v1beta/{extract_original_video_id(video_id)}"
+
+
+def _download_url(status_response: httpx.Response) -> str:
+    """The generated video's URI from a completed Veo operation, which the content download fetches"""
+    status_response.raise_for_status()
+    operation_response: Final = GeminiLongRunningOperationResponse.model_validate(_json_payload(status_response))
+
+    if not operation_response.done:
+        raise ValueError(
+            "Video generation is not complete yet. Please check status with video_status() before downloading."
+        )
+
+    if not operation_response.response:
+        raise ValueError("No response data in completed operation")
+
+    generate_video_response: Final = operation_response.response.generateVideoResponse
+    generated_samples: Final = generate_video_response.generatedSamples
+    if not generated_samples:
+        reasons: Final = generate_video_response.raiMediaFilteredReasons or []
+        raise ValueError("No generated samples in completed operation. " + " ".join(reasons))
+    return generated_samples[0].video.uri
 
 
 class GeminiVideoConfig(BaseVideoConfig):
@@ -437,48 +511,75 @@ class GeminiVideoConfig(BaseVideoConfig):
             }
         }
         """
+        start_url: Final = _start_image_url(video_create_optional_request_params)
+        return self._video_create_request(
+            model=model,
+            prompt=prompt,
+            api_base=api_base,
+            params=video_create_optional_request_params,
+            start_image=fetch_image_as_base64(start_url) if start_url else None,
+            reference_images=tuple(
+                fetch_image_as_base64(url) for url in _reference_image_urls(video_create_optional_request_params)
+            ),
+        )
+
+    async def async_transform_video_create_request(
+        self,
+        model: str,
+        prompt: str,
+        api_base: str,
+        video_create_optional_request_params: dict[str, object],  # mutable-ok: BaseVideoConfig contract
+        litellm_params: GenericLiteLLMParams,
+        headers: dict[str, str],  # mutable-ok: BaseVideoConfig contract
+    ) -> tuple[dict[str, object], RequestFiles, str]:  # mutable-ok: BaseVideoConfig contract
+        start_url: Final = _start_image_url(video_create_optional_request_params)
+        reference_images: Final = await asyncio.gather(
+            *(async_fetch_image_as_base64(url) for url in _reference_image_urls(video_create_optional_request_params))
+        )
+        return self._video_create_request(
+            model=model,
+            prompt=prompt,
+            api_base=api_base,
+            params=video_create_optional_request_params,
+            start_image=await async_fetch_image_as_base64(start_url) if start_url else None,
+            reference_images=tuple(reference_images),
+        )
+
+    def _video_create_request(
+        self,
+        model: str,
+        prompt: str,
+        api_base: str,
+        params: dict[str, object],  # mutable-ok: BaseVideoConfig contract passes the request params as a dict
+        start_image: tuple[str, str] | None,
+        reference_images: tuple[tuple[str, str], ...],
+    ) -> tuple[dict[str, object], RequestFiles, str]:  # mutable-ok: BaseVideoConfig contract
         instance: Final[GeminiVideoGenerationInstance] = {"prompt": prompt}
 
-        params_copy: Final = video_create_optional_request_params.copy()
+        params_copy: Final = params.copy()
+        image: Final = params_copy.pop("image", None)
+        params_copy.pop("image_url", None)
+        params_copy.pop("image_urls", None)
+        if isinstance(image, dict):
+            instance["image"] = image
+        elif image is not None and not isinstance(image, str):
+            instance["image"] = _convert_image_to_gemini_format(image)
+        elif start_image is not None:
+            instance["image"] = {
+                "bytesBase64Encoded": start_image[0],
+                "mimeType": start_image[1],
+            }  # mutable-ok: Veo JSON request body
 
-        if "image" in params_copy:
-            image: Final = params_copy.pop("image")
-            if image is not None:
-                if isinstance(image, dict):
-                    instance["image"] = image
-                elif isinstance(image, str):
-                    if not image.startswith(("http://", "https://")):
-                        raise ValueError(
-                            "Unsupported string image input for Gemini video generation; "
-                            f"expected an http(s) image URL, got: {image[:100]}"
-                        )
-                    params_copy["image_url"] = image
-                else:
-                    instance["image"] = _convert_image_to_gemini_format(image)
-
-        if "image_url" in params_copy:
-            image_url = params_copy.pop("image_url")
-            if image_url and "image" not in instance:
-                base64_data, mime_type = fetch_image_as_base64(image_url)
-                instance["image"] = {"bytesBase64Encoded": base64_data, "mimeType": mime_type}
-
-        # Veo 3.1 reference images ("ingredients", subject/character
-        # consistency): callers send fal-shaped image_urls; Veo wants up to
-        # three inline-base64 referenceImages ON THE INSTANCE (mirroring the
-        # image/lastFrame placement — NOT the parameters block).
-        if "image_urls" in params_copy:
-            image_urls = params_copy.pop("image_urls")
-            if image_urls:
-                reference_images = []
-                for reference_url in list(image_urls)[:_MAX_REFERENCE_IMAGES]:
-                    if not reference_url:
-                        continue
-                    base64_data, mime_type = fetch_image_as_base64(reference_url)
-                    reference_images.append(
-                        {"image": {"bytesBase64Encoded": base64_data, "mimeType": mime_type}, "referenceType": "asset"}
-                    )
-                if reference_images:
-                    instance["referenceImages"] = reference_images
+        # Veo 3.1 reference images ("ingredients", subject/character consistency): Veo wants up to
+        # three inline-base64 referenceImages ON THE INSTANCE, not in the parameters block
+        if reference_images:
+            instance["referenceImages"] = [  # mutable-ok: Veo JSON request body
+                {
+                    "image": {"bytesBase64Encoded": data, "mimeType": mime_type},
+                    "referenceType": "asset",
+                }  # mutable-ok: Veo JSON request body
+                for data, mime_type in reference_images
+            ]
 
         wants_audio = _audio_preference(params_copy)
         for audio_key in _AUDIO_PARAM_KEYS:
@@ -489,7 +590,7 @@ class GeminiVideoConfig(BaseVideoConfig):
             model, instance, params_copy
         )
 
-        parameters: Final = GeminiVideoGenerationParameters(**params_copy)
+        parameters: Final = GeminiVideoGenerationParameters.model_validate(params_copy)
 
         request_body_obj: Final = GeminiVideoGenerationRequest(instances=[instance], parameters=parameters)
 
@@ -671,34 +772,23 @@ class GeminiVideoConfig(BaseVideoConfig):
         1. Get operation status to extract video URI
         2. Return download URL for the video
         """
-        operation_name: Final = extract_original_video_id(video_id)
+        status_response: Final = litellm.module_level_client.get(
+            url=_operation_url(video_id, api_base), headers=headers
+        )
+        return _download_url(status_response), {}  # mutable-ok: BaseVideoConfig contract returns dict params
 
-        status_url: Final = f"{api_base.rstrip('/')}/v1beta/{operation_name}"
-        client: Final = litellm.module_level_client
-        status_response: Final = client.get(url=status_url, headers=headers)
-        status_response.raise_for_status()
-        response_data: Final = _json_payload(status_response)
-
-        operation_response: Final = GeminiLongRunningOperationResponse.model_validate(response_data)
-
-        if not operation_response.done:
-            raise ValueError(
-                "Video generation is not complete yet. Please check status with video_status() before downloading."
-            )
-
-        if not operation_response.response:
-            raise ValueError("No response data in completed operation")
-
-        generate_video_response = operation_response.response.generateVideoResponse
-        generated_samples = generate_video_response.generatedSamples
-        if not generated_samples:
-            reasons = generate_video_response.raiMediaFilteredReasons or []
-            raise ValueError("No generated samples in completed operation. " + " ".join(reasons))
-        download_url = generated_samples[0].video.uri
-
-        params: Final[dict[str, object]] = {}
-
-        return download_url, params
+    async def async_transform_video_content_request(
+        self,
+        video_id: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+        headers: dict[str, str],  # mutable-ok: BaseVideoConfig contract
+        variant: str | None = None,
+    ) -> tuple[str, dict[str, object]]:  # mutable-ok: BaseVideoConfig contract returns dict params
+        status_response: Final = await litellm.module_level_aclient.get(
+            url=_operation_url(video_id, api_base), headers=headers
+        )
+        return _download_url(status_response), {}  # mutable-ok: BaseVideoConfig contract returns dict params
 
     def transform_video_content_response(
         self,

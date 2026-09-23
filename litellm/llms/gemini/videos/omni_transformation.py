@@ -1,5 +1,6 @@
 import base64
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict
 
@@ -10,7 +11,7 @@ from typing_extensions import ReadOnly
 import litellm
 from litellm.constants import DEFAULT_GOOGLE_VIDEO_DURATION_SECONDS
 from litellm.litellm_core_utils.prompt_templates.common_utils import extract_file_data
-from litellm.litellm_core_utils.url_utils import safe_get
+from litellm.litellm_core_utils.url_utils import async_safe_get, safe_get
 from litellm.llms.base_llm.videos.transformation import BaseVideoConfig
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.interactions import InteractionsAPIResponse
@@ -22,7 +23,7 @@ from litellm.types.videos.utils import (
     extract_original_video_id,
 )
 
-from .transformation import fetch_image_as_base64
+from .transformation import async_fetch_image_as_base64, fetch_image_as_base64
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as _LiteLLMLoggingObj
@@ -201,11 +202,29 @@ def _source_video_part(video_url: str) -> _VideoPart:
     source costs a bounded read instead of worker memory. A body over the cap,
     whether a 206 at the boundary or a server that ignored Range, is refused.
     """
-    response: Final = safe_get(
-        litellm.module_level_client,
+    return _source_video_part_from(
+        safe_get(
+            litellm.module_level_client,
+            video_url,
+            headers={"Range": f"bytes=0-{_SOURCE_VIDEO_MAX_BYTES}"},  # mutable-ok: httpx takes a concrete headers dict
+        ),
         video_url,
-        headers={"Range": f"bytes=0-{_SOURCE_VIDEO_MAX_BYTES}"},  # mutable-ok: httpx takes a concrete headers dict
     )
+
+
+async def _async_source_video_part(video_url: str) -> _VideoPart:
+    """_source_video_part for the async request path, where a sync download would block the event loop"""
+    return _source_video_part_from(
+        await async_safe_get(
+            litellm.module_level_aclient,
+            video_url,
+            headers={"Range": f"bytes=0-{_SOURCE_VIDEO_MAX_BYTES}"},  # mutable-ok: httpx takes a concrete headers dict
+        ),
+        video_url,
+    )
+
+
+def _source_video_part_from(response: httpx.Response, video_url: str) -> _VideoPart:
     response.raise_for_status()
     content: Final = response.content
     if not content:
@@ -272,6 +291,18 @@ def _start_frame_part(start_frame: FileTypes) -> dict[str, str]:
         base64_data, mime_type = fetch_image_as_base64(start_frame)
         # mutable-ok: request part dict, handed straight to the JSON body
         return {"type": "image", "data": base64_data, "mime_type": mime_type}
+    return _inline_start_frame_part(start_frame)
+
+
+async def _async_start_frame_part(start_frame: FileTypes) -> dict[str, str]:  # mutable-ok: request part dict
+    """_start_frame_part for the async request path, where a sync download would block the event loop"""
+    if isinstance(start_frame, str):
+        base64_data, mime_type = await async_fetch_image_as_base64(start_frame)
+        return {"type": "image", "data": base64_data, "mime_type": mime_type}  # mutable-ok: request part dict
+    return _inline_start_frame_part(start_frame)
+
+
+def _inline_start_frame_part(start_frame: FileTypes) -> dict[str, str]:  # mutable-ok: request part dict
     extracted = extract_file_data(start_frame)
     content_type = extracted.get("content_type") or ""
     if not content_type or content_type == "application/octet-stream":
@@ -281,6 +312,118 @@ def _start_frame_part(start_frame: FileTypes) -> dict[str, str]:
         "data": base64.b64encode(extracted["content"]).decode("utf-8"),
         "mime_type": content_type,
     }
+
+
+def _media_inputs(params: Mapping[str, object]) -> tuple[str | None, FileTypes | None]:
+    """The edit source clip URL and the start frame, after refusing combinations Omni cannot execute"""
+    start_frame: Final = params.get("image_url") or params.get("input_reference")
+    source_videos: Final = _source_video_urls(params.get("video_urls"))
+
+    if source_videos and start_frame:
+        # An explicit edit task disables multimodal reference inputs (Google's
+        # cookbook), and a start frame has no meaning when the source clip
+        # supplies every frame; refusing beats silently dropping either.
+        raise ValueError(
+            "Gemini Omni edit mode takes the source clip only: send video_urls without image_url / input_reference"
+        )
+    if len(source_videos) > _MAX_SOURCE_VIDEOS:
+        raise ValueError(f"Gemini Omni edits exactly one source video per request; got {len(source_videos)} video_urls")
+    return (source_videos[0] if source_videos else None), (start_frame or None)  # pyright: ignore[reportReturnType]  # start frame is an untyped OpenAI-shaped param
+
+
+def _interaction_request(
+    model: str,
+    prompt: str,
+    api_base: str,
+    params: Mapping[str, object],
+    source_video_part: _VideoPart | None,
+    start_frame_part: dict[str, str] | None,  # mutable-ok: request part dict
+) -> tuple[dict[str, object], RequestFiles, str]:  # mutable-ok: BaseVideoConfig contract returns a dict body
+    seconds = params.get("seconds") or params.get("duration_seconds")
+    negative_prompt = params.get("negative_prompt")
+    aspect_ratio = params.get("aspect_ratio")
+
+    prompt_parts: list[str] = [prompt]
+    # Edit output follows the source clip, so a duration clause would fight the
+    # source; it is folded in for generation only.
+    if seconds and source_video_part is None:
+        prompt_parts.append(f"The video must be exactly {seconds} seconds long.")
+    if negative_prompt:
+        prompt_parts.append(f"Do not include: {negative_prompt}.")
+    full_prompt = " ".join(prompt_parts)
+
+    response_format: dict[str, Any] = {"type": "video"}
+    # The edit inherits the source clip's framing; an aspect ratio only applies
+    # to generation.
+    if aspect_ratio in _SUPPORTED_ASPECT_RATIOS and source_video_part is None:
+        response_format["aspect_ratio"] = aspect_ratio
+
+    request_data: dict[str, Any] = {
+        "model": model.replace("gemini/", ""),
+        "input": full_prompt,
+        "response_format": response_format,
+        # NOT background: see the GeminiOmniVideoConfig docstring -- Google no longer
+        # resolves a backgrounded interaction id (NOL-1106).
+        "background": False,
+        "store": True,
+    }
+
+    if source_video_part is not None:
+        text_part: Final[_TextPart] = {"type": "text", "text": full_prompt}
+        edit_input: Final = [  # mutable-ok: Interactions requires a JSON array of ordered input parts
+            source_video_part,
+            text_part,
+        ]
+        edit_video_config: Final[_EditVideoConfig] = {"task": "edit"}
+        edit_generation_config: Final[_EditGenerationConfig] = {"video_config": edit_video_config}
+        request_data["input"] = edit_input
+        request_data["generation_config"] = edit_generation_config
+    elif start_frame_part is not None:
+        request_data["input"] = [
+            start_frame_part,
+            {"type": "text", "text": full_prompt},
+        ]
+        request_data["generation_config"] = {"video_config": {"task": "image_to_video"}}
+
+    return request_data, [], api_base
+
+
+@dataclass(frozen=True, slots=True)
+class _VideoDownload:
+    url: str
+    api_key: str | None
+
+
+def _completed_video_output(raw_response: httpx.Response) -> bytes | _VideoDownload:
+    """The rendered video from a completed interaction: its bytes when inline, else where to download it"""
+    interaction: Final = InteractionsAPIResponse(**raw_response.json())
+
+    status: Final = _map_interaction_status(interaction.status)
+    if status == "processing":
+        raise ValueError(
+            "Video generation is not complete yet. Please check status with video_status() before downloading."
+        )
+    if status == "failed":
+        raise ValueError(f"Gemini Omni video generation ended with status {interaction.status!r}.")
+
+    video_part: Final = _find_video_part(interaction)
+    if video_part is None:
+        raise ValueError("No video output in completed interaction.")
+
+    inline_data: Final = video_part.get("data")
+    if inline_data:
+        return base64.b64decode(inline_data)
+
+    uri: Final = video_part.get("uri")
+    if not uri:
+        raise ValueError("Video output has neither inline data nor a download URI.")
+    return _VideoDownload(url=uri, api_key=raw_response.request.headers.get("x-goog-api-key"))
+
+
+def _download_headers(output: _VideoDownload) -> dict[str, str]:  # mutable-ok: httpx takes a concrete headers dict
+    return (
+        {"x-goog-api-key": output.api_key} if output.api_key else {}
+    )  # mutable-ok: httpx takes a concrete headers dict
 
 
 class GeminiOmniVideoConfig(BaseVideoConfig):
@@ -413,69 +556,34 @@ class GeminiOmniVideoConfig(BaseVideoConfig):
         litellm_params: GenericLiteLLMParams,
         headers: dict,
     ) -> tuple[dict, RequestFiles, str]:
-        params = video_create_optional_request_params
+        source_video, start_frame = _media_inputs(video_create_optional_request_params)
+        return _interaction_request(
+            model=model,
+            prompt=prompt,
+            api_base=api_base,
+            params=video_create_optional_request_params,
+            source_video_part=_source_video_part(source_video) if source_video else None,
+            start_frame_part=_start_frame_part(start_frame) if start_frame else None,
+        )
 
-        seconds = params.get("seconds") or params.get("duration_seconds")
-        negative_prompt = params.get("negative_prompt")
-        aspect_ratio = params.get("aspect_ratio")
-        start_frame = params.get("image_url") or params.get("input_reference")
-        source_videos: Final = _source_video_urls(params.get("video_urls"))
-
-        if source_videos and start_frame:
-            # An explicit edit task disables multimodal reference inputs (Google's
-            # cookbook), and a start frame has no meaning when the source clip
-            # supplies every frame; refusing beats silently dropping either.
-            raise ValueError(
-                "Gemini Omni edit mode takes the source clip only: send video_urls without image_url / input_reference"
-            )
-        if len(source_videos) > _MAX_SOURCE_VIDEOS:
-            raise ValueError(
-                f"Gemini Omni edits exactly one source video per request; got {len(source_videos)} video_urls"
-            )
-
-        prompt_parts: list[str] = [prompt]
-        # Edit output follows the source clip, so a duration clause would fight the
-        # source; it is folded in for generation only.
-        if seconds and not source_videos:
-            prompt_parts.append(f"The video must be exactly {seconds} seconds long.")
-        if negative_prompt:
-            prompt_parts.append(f"Do not include: {negative_prompt}.")
-        full_prompt = " ".join(prompt_parts)
-
-        response_format: dict[str, Any] = {"type": "video"}
-        # The edit inherits the source clip's framing; an aspect ratio only applies
-        # to generation.
-        if aspect_ratio in _SUPPORTED_ASPECT_RATIOS and not source_videos:
-            response_format["aspect_ratio"] = aspect_ratio
-
-        request_data: dict[str, Any] = {
-            "model": model.replace("gemini/", ""),
-            "input": full_prompt,
-            "response_format": response_format,
-            # NOT background: see the class docstring -- Google no longer resolves
-            # a backgrounded interaction id (NOL-1106).
-            "background": False,
-            "store": True,
-        }
-
-        if source_videos:
-            text_part: Final[_TextPart] = {"type": "text", "text": full_prompt}
-            edit_input: Final = [  # mutable-ok: Interactions requires a JSON array of ordered input parts
-                _source_video_part(source_videos[0]),
-                text_part,
-            ]
-            edit_video_config: Final[_EditVideoConfig] = {"task": "edit"}
-            edit_generation_config: Final[_EditGenerationConfig] = {"video_config": edit_video_config}
-            request_data["input"] = edit_input
-            request_data["generation_config"] = edit_generation_config
-        elif start_frame:
-            request_data["input"] = [
-                _start_frame_part(start_frame),
-                {"type": "text", "text": full_prompt},
-            ]
-            request_data["generation_config"] = {"video_config": {"task": "image_to_video"}}
-
-        return request_data, [], api_base
+    async def async_transform_video_create_request(
+        self,
+        model: str,
+        prompt: str,
+        api_base: str,
+        video_create_optional_request_params: dict[str, object],  # mutable-ok: BaseVideoConfig contract
+        litellm_params: GenericLiteLLMParams,
+        headers: dict[str, str],  # mutable-ok: BaseVideoConfig contract
+    ) -> tuple[dict[str, object], RequestFiles, str]:  # mutable-ok: BaseVideoConfig contract returns a dict body
+        source_video, start_frame = _media_inputs(video_create_optional_request_params)
+        return _interaction_request(
+            model=model,
+            prompt=prompt,
+            api_base=api_base,
+            params=video_create_optional_request_params,
+            source_video_part=await _async_source_video_part(source_video) if source_video else None,
+            start_frame_part=await _async_start_frame_part(start_frame) if start_frame else None,
+        )
 
     def transform_video_create_response(
         self,
@@ -571,35 +679,26 @@ class GeminiOmniVideoConfig(BaseVideoConfig):
         raw_response: httpx.Response,
         logging_obj: LiteLLMLoggingObj,
     ) -> bytes:
-        interaction = InteractionsAPIResponse(**raw_response.json())
+        output: Final = _completed_video_output(raw_response)
+        if isinstance(output, bytes):
+            return output
+        download_response: Final = litellm.module_level_client.get(url=output.url, headers=_download_headers(output))
+        download_response.raise_for_status()
+        return download_response.content
 
-        status = _map_interaction_status(interaction.status)
-        if status == "processing":
-            raise ValueError(
-                "Video generation is not complete yet. Please check status with video_status() before downloading."
-            )
-        if status == "failed":
-            raise ValueError(f"Gemini Omni video generation ended with status {interaction.status!r}.")
-
-        video_part = _find_video_part(interaction)
-        if video_part is None:
-            raise ValueError("No video output in completed interaction.")
-
-        inline_data = video_part.get("data")
-        if inline_data:
-            return base64.b64decode(inline_data)
-
-        uri = video_part.get("uri")
-        if uri:
-            download_headers: dict[str, str] = {}
-            api_key = raw_response.request.headers.get("x-goog-api-key")
-            if api_key:
-                download_headers["x-goog-api-key"] = api_key
-            download_response = litellm.module_level_client.get(url=uri, headers=download_headers)
-            download_response.raise_for_status()
-            return download_response.content
-
-        raise ValueError("Video output has neither inline data nor a download URI.")
+    async def async_transform_video_content_response(
+        self,
+        raw_response: httpx.Response,
+        logging_obj: LiteLLMLoggingObj,
+    ) -> bytes:
+        output: Final = _completed_video_output(raw_response)
+        if isinstance(output, bytes):
+            return output
+        download_response: Final = await litellm.module_level_aclient.get(
+            url=output.url, headers=_download_headers(output)
+        )
+        download_response.raise_for_status()
+        return download_response.content
 
     def transform_video_remix_request(
         self,

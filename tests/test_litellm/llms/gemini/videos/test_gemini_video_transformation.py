@@ -1270,3 +1270,91 @@ class TestGeminiVideoCostTracking:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+PNG_START = b"\x89PNG\r\n\x1a\n" + b"start-frame"
+PNG_REFERENCE = b"\x89PNG\r\n\x1a\n" + b"reference"
+
+
+@pytest.fixture
+def sync_downloads_forbidden(monkeypatch):
+    """The async request path must not touch the sync module client: on a one-worker proxy that I/O blocks the loop"""
+    import litellm
+    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    monkeypatch.setattr(litellm, "user_url_validation", False)
+    litellm.in_memory_llm_clients_cache.flush_cache()
+    sync_client = Mock()
+    sync_client.get.side_effect = AssertionError("a sync download ran on the async request path")
+    monkeypatch.setattr(litellm, "module_level_client", sync_client)
+    monkeypatch.setattr(litellm, "module_level_aclient", AsyncHTTPHandler())
+    yield
+    litellm.in_memory_llm_clients_cache.flush_cache()
+
+
+@pytest.mark.asyncio
+async def test_async_create_downloads_the_start_frame_and_references_without_blocking(
+    respx_mock, sync_downloads_forbidden
+):
+    import base64
+
+    import litellm
+
+    respx_mock.get("https://img.test/start.png").mock(return_value=httpx.Response(200, content=PNG_START))
+    respx_mock.get("https://img.test/reference.png").mock(return_value=httpx.Response(200, content=PNG_REFERENCE))
+    create = respx_mock.post(
+        "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning"
+    ).mock(return_value=httpx.Response(200, json={"name": "operations/generate-async-1"}))
+
+    await litellm.avideo_generation(
+        model="gemini/veo-3.1-generate-preview",
+        prompt="a lighthouse at dusk",
+        image_url="https://img.test/start.png",
+        image_urls=["https://img.test/reference.png"],
+        api_key="fake-gemini-key",
+    )
+
+    instance = json.loads(create.calls.last.request.content)["instances"][0]
+    assert instance["image"] == {"bytesBase64Encoded": base64.b64encode(PNG_START).decode(), "mimeType": "image/png"}
+    assert instance["referenceImages"] == [
+        {
+            "image": {"bytesBase64Encoded": base64.b64encode(PNG_REFERENCE).decode(), "mimeType": "image/png"},
+            "referenceType": "asset",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_content_looks_up_the_operation_without_blocking(respx_mock, sync_downloads_forbidden):
+    import litellm
+    from litellm.types.videos.utils import encode_video_id_with_provider
+
+    respx_mock.get("https://generativelanguage.googleapis.com/v1beta/operations/generate-async-2").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "name": "operations/generate-async-2",
+                "done": True,
+                "response": {
+                    "generateVideoResponse": {
+                        "generatedSamples": [
+                            {"video": {"uri": "https://generativelanguage.googleapis.com/v1beta/files/out:download"}}
+                        ]
+                    }
+                },
+            },
+        )
+    )
+    respx_mock.get("https://generativelanguage.googleapis.com/v1beta/files/out:download").mock(
+        return_value=httpx.Response(200, content=b"veo-mp4-bytes")
+    )
+
+    content = await litellm.avideo_content(
+        video_id=encode_video_id_with_provider(
+            "operations/generate-async-2", "gemini", "veo-3.1-generate-preview"
+        ),
+        api_key="fake-gemini-key",
+    )
+
+    assert content == b"veo-mp4-bytes"

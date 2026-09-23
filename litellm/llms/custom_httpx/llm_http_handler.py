@@ -7224,7 +7224,7 @@ class BaseLLMHTTPHandler:
             data,
             files,
             api_base,
-        ) = video_generation_provider_config.transform_video_create_request(
+        ) = await video_generation_provider_config.async_transform_video_create_request(
             model=model,
             prompt=prompt,
             api_base=api_base,
@@ -7422,7 +7422,7 @@ class BaseLLMHTTPHandler:
         )
 
         # Transform the request using the provider config
-        url, data = video_content_provider_config.transform_video_content_request(
+        url, data = await video_content_provider_config.async_transform_video_content_request(
             video_id=video_id,
             api_base=api_base,
             litellm_params=litellm_params,
