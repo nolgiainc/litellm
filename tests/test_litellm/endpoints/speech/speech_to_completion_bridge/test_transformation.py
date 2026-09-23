@@ -17,9 +17,7 @@ PCM_BYTES: Final = b"\x01\x02\x03\x04" * 6
 
 
 def _model_response(model: str, pcm: bytes) -> ModelResponse:
-    audio: Final = ChatCompletionAudioResponse(
-        data=base64.b64encode(pcm).decode(), expires_at=0, transcript="hello"
-    )
+    audio: Final = ChatCompletionAudioResponse(data=base64.b64encode(pcm).decode(), expires_at=0, transcript="hello")
     return ModelResponse(model=model, choices=[Choices(message=Message(content=None, audio=audio))])
 
 
@@ -248,3 +246,77 @@ def test_lyria_prices_as_a_flat_per_song_audio_generation() -> None:
             prompt_characters=83,
         )
         assert prompt_cost + completion_cost == pytest.approx(price), model
+
+
+LYRIA_BLOCKED_PROMPT_RESPONSE: Final = {
+    "promptFeedback": {"blockReason": "PROHIBITED_CONTENT"},
+    "usageMetadata": {
+        "promptTokenCount": 20,
+        "totalTokenCount": 20,
+        "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 20}],
+        "serviceTier": "standard",
+    },
+    "modelVersion": "lyria-3.5",
+    "responseId": "yg60arLwGPTUz7IP8o7yqAs",
+}
+
+
+@pytest.mark.asyncio
+async def test_lyria_blocked_prompt_is_a_non_retried_content_policy_400(
+    respx_mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    generate_content: Final = respx_mock.post(
+        url__regex=r"https://generativelanguage\.googleapis\.com/v1beta/models/lyria-3\.5:generateContent.*"
+    ).mock(return_value=httpx.Response(200, json=LYRIA_BLOCKED_PROMPT_RESPONSE))
+    router: Final = litellm.Router(
+        model_list=[
+            {
+                "model_name": "music-lyria3-pro",
+                "litellm_params": {"model": "gemini/lyria-3.5", "api_key": "fake-gemini-key"},
+                "model_info": {"mode": "audio_speech"},
+            }
+        ],
+        num_retries=2,
+    )
+
+    with pytest.raises(litellm.ContentPolicyViolationError) as excinfo:
+        await router.aspeech(model="music-lyria3-pro", input="a song", voice=None)
+
+    assert excinfo.value.status_code == 400
+    assert "promptFeedback.blockReason=PROHIBITED_CONTENT" in str(excinfo.value)
+    assert "content policy" in str(excinfo.value)
+    assert excinfo.value.provider_specific_fields == {"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}}
+    assert generate_content.call_count == 1
+
+
+def test_candidate_level_block_names_the_finish_reason() -> None:
+    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import VertexGeminiConfig
+
+    blocked: Final = {
+        "candidates": [{"finishReason": "PROHIBITED_CONTENT", "finishMessage": "Blocked.", "index": 0}],
+        "usageMetadata": {"promptTokenCount": 6, "totalTokenCount": 6},
+    }
+    model_response: Final = VertexGeminiConfig()._transform_google_generate_content_to_openai_model_response(
+        completion_response=blocked,
+        model_response=ModelResponse(),
+        model="lyria-3.5",
+        logging_obj=MagicMock(optional_params={}),
+        raw_response=MagicMock(),
+    )
+
+    with pytest.raises(litellm.ContentPolicyViolationError) as excinfo:
+        SpeechToCompletionBridgeTransformationHandler().transform_response(model_response, None)
+
+    assert "finishReason=PROHIBITED_CONTENT (Blocked.)" in str(excinfo.value)
+
+
+def test_missing_audio_without_a_filter_is_not_reported_as_a_refusal() -> None:
+    model_response: Final = ModelResponse(
+        model="lyria-3.5", choices=[Choices(finish_reason="stop", message=Message(content="no song today"))]
+    )
+
+    with pytest.raises(ValueError, match="finish_reason='stop'"):
+        SpeechToCompletionBridgeTransformationHandler().transform_response(model_response, None)

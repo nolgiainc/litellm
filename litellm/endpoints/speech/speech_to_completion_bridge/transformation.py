@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, NamedTuple, cast
 
 from typing_extensions import NotRequired, ReadOnly, TypedDict
 
@@ -8,6 +8,7 @@ from litellm.constants import OPENAI_CHAT_COMPLETION_PARAMS
 
 if TYPE_CHECKING:
     from litellm import Logging as LiteLLMLoggingObj
+    from litellm.exceptions import ContentPolicyViolationError
     from litellm.types.llms.openai import ChatCompletionUserMessage, HttpxBinaryResponseContent
     from litellm.types.utils import ModelResponse
 
@@ -74,6 +75,54 @@ def _sniff_audio_content_type(audio: bytes) -> str:
         if audio[1] & 0xE0 == 0xE0:
             return "audio/mpeg"
     return DEFAULT_AUDIO_CONTENT_TYPE
+
+
+class _ContentFilterRefusal(NamedTuple):
+    detail: str
+    evidence_key: str
+    evidence: object
+
+
+def _content_filter_refusal(prompt_feedback: object, blocked_candidate: object) -> _ContentFilterRefusal:
+    if isinstance(prompt_feedback, Mapping) and prompt_feedback.get("blockReason"):
+        block_message: Final = prompt_feedback.get("blockReasonMessage")
+        return _ContentFilterRefusal(
+            "the provider refused this prompt under its content policy and generated nothing: "
+            f"promptFeedback.blockReason={prompt_feedback.get('blockReason')}"
+            + (f" ({block_message})" if block_message else ""),
+            "promptFeedback",
+            prompt_feedback,
+        )
+    if isinstance(blocked_candidate, Mapping) and blocked_candidate.get("finishReason"):
+        finish_message: Final = blocked_candidate.get("finishMessage")
+        return _ContentFilterRefusal(
+            "the provider's content policy blocked the generated audio: "
+            f"finishReason={blocked_candidate.get('finishReason')}"
+            + (f" ({finish_message})" if finish_message else ""),
+            "candidate",
+            blocked_candidate,
+        )
+    return _ContentFilterRefusal("the provider's content policy filtered the response and returned no audio", "", None)
+
+
+def _content_filter_error(
+    model_response: "ModelResponse", model: str, custom_llm_provider: str
+) -> "ContentPolicyViolationError":
+    """A filtered completion has no audio part. Reading it anyway raised an AttributeError that surfaced as a
+    retried 500 (NOL-1143), so a refusal is a non-retried 400 that carries the provider's own reason."""
+    from litellm.exceptions import ContentPolicyViolationError
+
+    hidden_params: Final[Mapping[str, object]] = getattr(model_response, "_hidden_params", None) or MappingProxyType({})
+    refusal: Final = _content_filter_refusal(
+        hidden_params.get("vertex_ai_prompt_feedback"), hidden_params.get("vertex_ai_blocked_candidate")
+    )
+    provider_fields: Final = {refusal.evidence_key: refusal.evidence}  # mutable-ok: the exception field is a dict
+    return ContentPolicyViolationError(
+        message=refusal.detail,
+        model=model,
+        llm_provider=custom_llm_provider,
+        provider_specific_fields=provider_fields if refusal.evidence_key else None,
+    )
 
 
 class ChatAudioParam(TypedDict):
@@ -205,21 +254,24 @@ class SpeechToCompletionBridgeTransformationHandler:
         return self._convert_pcm16_to_wav(decoded_audio), "audio/wav"
 
     def transform_response(
-        self, model_response: "ModelResponse", response_format: str | None
+        self, model_response: "ModelResponse", response_format: str | None, custom_llm_provider: str = "gemini"
     ) -> "HttpxBinaryResponseContent":
         import base64
 
         import httpx
 
         from litellm.types.llms.openai import HttpxBinaryResponseContent
-        from litellm.types.utils import Choices
-
-        audio_part: Final = cast(Choices, model_response.choices[0]).message.audio
-        if audio_part is None:
-            raise ValueError("No audio part found in the response")
-        decoded_audio: Final = base64.b64decode(audio_part.data)
+        from litellm.types.utils import ChatCompletionAudioResponse, Choices
 
         model: Final = getattr(model_response, "model", "")
+        choice: Final = cast(Choices, model_response.choices[0])
+        audio_part: Final[ChatCompletionAudioResponse | None] = getattr(choice.message, "audio", None)
+        if audio_part is None:
+            if choice.finish_reason == "content_filter":
+                raise _content_filter_error(model_response, model, custom_llm_provider)
+            raise ValueError(f"No audio part found in the response (finish_reason={choice.finish_reason!r})")
+        decoded_audio: Final = base64.b64decode(audio_part.data)
+
         content, content_type = (
             self._gemini_tts_response_body(decoded_audio, response_format)
             if self._is_gemini_tts_model(model)
