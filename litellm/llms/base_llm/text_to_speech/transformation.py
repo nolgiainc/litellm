@@ -133,6 +133,22 @@ class BaseTextToSpeechConfig(ABC):
         Transform provider response to standard format
         """
 
+    async def async_transform_text_to_speech_response(
+        self,
+        model: str,
+        raw_response: httpx.Response,
+        logging_obj: LiteLLMLoggingObj,
+    ) -> "HttpxBinaryResponseContent":
+        """
+        Async transform of a provider response. Providers whose response needs further network calls
+        (e.g. polling a job queue) must override this, or those calls block the event loop
+        """
+        return self.transform_text_to_speech_response(
+            model=model,
+            raw_response=raw_response,
+            logging_obj=logging_obj,
+        )
+
     def get_error_class(self, error_message: str, status_code: int, headers: dict) -> BaseLLMException:
         from ..chat.transformation import BaseLLMException
 
