@@ -139,6 +139,31 @@ class BaseVideoConfig(ABC):
     ) -> tuple[dict, RequestFiles, str]:
         pass
 
+    async def async_transform_video_create_request(
+        self,
+        model: str,
+        prompt: str,
+        api_base: str,
+        video_create_optional_request_params: dict[
+            str, object
+        ],  # mutable-ok: BaseVideoConfig contract, as the sync transform
+        litellm_params: GenericLiteLLMParams,
+        headers: dict[str, str],  # mutable-ok: BaseVideoConfig contract, as the sync transform
+    ) -> tuple[dict[str, object], RequestFiles, str]:  # mutable-ok: BaseVideoConfig contract, as the sync transform
+        """
+        Async transform of a video create request. Providers whose request needs network I/O
+        (e.g. downloading a start frame or source clip to inline it) must override this, or that
+        I/O blocks the event loop. Defaults to the sync transform_video_create_request
+        """
+        return self.transform_video_create_request(
+            model=model,
+            prompt=prompt,
+            api_base=api_base,
+            video_create_optional_request_params=video_create_optional_request_params,
+            litellm_params=litellm_params,
+            headers=headers,
+        )
+
     @abstractmethod
     def transform_video_create_response(
         self,
@@ -189,6 +214,27 @@ class BaseVideoConfig(ABC):
         Returns:
             Tuple[str, Dict]: (url, params) for the video content request
         """
+
+    async def async_transform_video_content_request(
+        self,
+        video_id: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+        headers: dict[str, str],  # mutable-ok: BaseVideoConfig contract, as the sync transform
+        variant: str | None = None,
+    ) -> tuple[str, dict[str, object]]:  # mutable-ok: BaseVideoConfig contract, as the sync transform
+        """
+        Async transform of a video content request. Providers that must look something up
+        before they know the download URL must override this, or that lookup blocks the event
+        loop. Defaults to the sync transform_video_content_request
+        """
+        return self.transform_video_content_request(
+            video_id=video_id,
+            api_base=api_base,
+            litellm_params=litellm_params,
+            headers=headers,
+            variant=variant,
+        )
 
     @abstractmethod
     def transform_video_content_response(

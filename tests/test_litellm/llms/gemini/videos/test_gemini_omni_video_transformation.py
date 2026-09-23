@@ -560,3 +560,93 @@ class TestGeminiOmniEditMode:
         assert request_data["input"] == "A cat. The video must be exactly 6 seconds long."
         assert request_data["response_format"] == {"type": "video", "aspect_ratio": "9:16"}
         assert "generation_config" not in request_data
+
+
+OMNI_INTERACTIONS_URL = f"{API_BASE}/v1beta/interactions"
+
+
+def _completed_interaction(video_content: dict) -> dict:
+    return {
+        "id": "v1_async",
+        "status": "completed",
+        "steps": [{"type": "model_output", "content": [{"type": "video", "mime_type": "video/mp4", **video_content}]}],
+    }
+
+
+@pytest.fixture
+def sync_downloads_forbidden(monkeypatch):
+    """The async request path must not touch the sync module client: on a one-worker proxy that I/O blocks the loop"""
+    import litellm
+    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    monkeypatch.setattr(litellm, "user_url_validation", False)
+    litellm.in_memory_llm_clients_cache.flush_cache()
+    sync_client = Mock()
+    sync_client.get.side_effect = AssertionError("a sync download ran on the async request path")
+    monkeypatch.setattr(litellm, "module_level_client", sync_client)
+    monkeypatch.setattr(litellm, "module_level_aclient", AsyncHTTPHandler())
+    yield
+    litellm.in_memory_llm_clients_cache.flush_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_params", "media_url", "media_bytes", "expected_part"),
+    [
+        (
+            {"video_urls": ["https://media.test/source.mp4"]},
+            "https://media.test/source.mp4",
+            b"source-mp4",
+            {"type": "video", "mime_type": "video/mp4", "data": base64.b64encode(b"source-mp4").decode()},
+        ),
+        (
+            {"image_url": "https://media.test/start.png"},
+            "https://media.test/start.png",
+            b"\x89PNG\r\n\x1a\nstart",
+            {"type": "image", "mime_type": "image/png", "data": base64.b64encode(b"\x89PNG\r\n\x1a\nstart").decode()},
+        ),
+    ],
+    ids=["edit-source-clip", "start-frame"],
+)
+async def test_async_create_downloads_its_media_without_blocking(
+    respx_mock, sync_downloads_forbidden, media_params, media_url, media_bytes, expected_part
+):
+    import json
+
+    import litellm
+
+    respx_mock.get(media_url).mock(
+        return_value=httpx.Response(200, content=media_bytes, headers={"content-type": expected_part["mime_type"]})
+    )
+    create = respx_mock.post(OMNI_INTERACTIONS_URL).mock(
+        return_value=httpx.Response(200, json=_completed_interaction({"data": base64.b64encode(b"out").decode()}))
+    )
+
+    await litellm.avideo_generation(
+        model="gemini/gemini-omni-1.1-flash", prompt="add fog", api_key="fake-gemini-key", **media_params
+    )
+
+    assert json.loads(create.calls.last.request.content)["input"][0] == expected_part
+
+
+@pytest.mark.asyncio
+async def test_async_content_downloads_a_uri_output_without_blocking(respx_mock, sync_downloads_forbidden):
+    import litellm
+
+    respx_mock.get(f"{OMNI_INTERACTIONS_URL}/v1_async").mock(
+        return_value=httpx.Response(
+            200, json=_completed_interaction({"uri": f"{API_BASE}/v1beta/files/omni-out:download?alt=media"})
+        )
+    )
+    download = respx_mock.get(f"{API_BASE}/v1beta/files/omni-out:download?alt=media").mock(
+        return_value=httpx.Response(200, content=b"omni-mp4-bytes")
+    )
+
+    content = await litellm.avideo_content(
+        video_id=encode_video_id_with_provider("v1_async", "gemini", "gemini-omni-1.1-flash"),
+        api_key="fake-gemini-key",
+    )
+
+    assert content == b"omni-mp4-bytes"
+    assert download.calls.last.request.headers["x-goog-api-key"] == "fake-gemini-key"
