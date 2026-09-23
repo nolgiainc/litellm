@@ -41,6 +41,7 @@ SUPPORTED_PARAMS: Final = frozenset(
         "audio_urls",
         "generate_audio",
         "ratio",
+        "aspect_ratio",
         "duration",
         "resolution",
         "bitrate_mode",
@@ -99,8 +100,9 @@ def _size_params(params: Mapping[str, JsonValue], model: str) -> Mapping[str, Js
             raise SeeGenError(status_code=400, message=f"Unsupported Seedance size: {size}")
         ratio, resolution = resolve_size(size)
         return MappingProxyType({"ratio": ratio, "resolution": _wire_resolution(model, resolution)})
+    ratio_key: Final = "ratio" if "ratio" in params else "aspect_ratio" if "aspect_ratio" in params else None
     ratio_params: Final[Mapping[str, JsonValue]] = (
-        MappingProxyType({"ratio": params["ratio"]}) if "ratio" in params else EMPTY_JSON_OBJECT
+        MappingProxyType({"ratio": params[ratio_key]}) if ratio_key is not None else EMPTY_JSON_OBJECT
     )
     resolution_params: Final[Mapping[str, JsonValue]] = (
         MappingProxyType({"resolution": _wire_resolution(model, params["resolution"])})
@@ -149,7 +151,7 @@ def map_seedance_params(
         else EMPTY_JSON_OBJECT
     )
     size_params: Final = _size_params(selected, normalized_model)
-    transformed: Final = frozenset({"seconds", "duration", "size", "ratio", "resolution"})
+    transformed: Final = frozenset({"seconds", "duration", "size", "ratio", "aspect_ratio", "resolution"})
     retained: Final[Mapping[str, JsonValue]] = MappingProxyType(
         {key: value for key, value in selected.items() if key not in transformed}
     )
