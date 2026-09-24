@@ -29,6 +29,7 @@ SIZE_OPTIONS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
         "2160x3840": ("9:16", "4K"),
     }
 )
+INPUT_VIDEO_SECONDS: Final = "input_video_seconds"
 SUPPORTED_PARAMS: Final = frozenset(
     {
         "seconds",
@@ -50,6 +51,7 @@ SUPPORTED_PARAMS: Final = frozenset(
         "omni_reference_task_type",
         "return_last_frame",
         "safety_identifier",
+        INPUT_VIDEO_SECONDS,
     }
 )
 IGNORED_STANDARD_PARAMS: Final = frozenset({"model", "prompt", "user", "extra_headers"})
@@ -179,7 +181,17 @@ def _duration(value: JsonValue | None) -> int | None:
     raise SeeGenError(status_code=400, message="Seedance duration must be an integer")
 
 
+def input_video_seconds(value: JsonValue | None) -> float | None:
+    """Combined length of the reference videos, a billing hint that is never sent to Ark."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise SeeGenError(status_code=400, message=f"{INPUT_VIDEO_SECONDS} must be a positive number of seconds")
+    return float(value)
+
+
 def _validate_options(model: str, params: Mapping[str, JsonValue]) -> None:
+    input_video_seconds(params.get(INPUT_VIDEO_SECONDS))
     duration: Final = params.get("duration")
     if duration is not None:
         maximum: Final = 30 if model in SEEDANCE_25_MODELS else 15
