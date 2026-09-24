@@ -155,7 +155,8 @@ def _billed_usage(request_data: Mapping[str, JsonValue], input_seconds: float | 
     The usage reports those combined seconds under a ``<tier>_video_input`` tier so the deployment's
     ``output_cost_per_second_<tier>_video_input`` pin prices them. An edit renders at the source's own
     length (``duration: -1``), so its output seconds are the input's. Without a length hint the input is
-    assumed to be as long as the output.
+    assumed to be as long as the output. Ark bills an input shorter than (output - 1) seconds as that
+    minimum: a 4s render over a 2s clip billed 67,652 tokens, (4 + 3)s plus one frame at 480p.
     """
     video_input: Final = _has_video_input(request_data)
     requested: Final = _positive_seconds(request_data.get("duration"))
@@ -163,7 +164,7 @@ def _billed_usage(request_data: Mapping[str, JsonValue], input_seconds: float | 
     billed_seconds: Final = (
         None
         if output_seconds is None
-        else output_seconds + (input_seconds if input_seconds is not None else output_seconds)
+        else output_seconds + max(input_seconds if input_seconds is not None else output_seconds, output_seconds - 1)
         if video_input
         else output_seconds
     )
