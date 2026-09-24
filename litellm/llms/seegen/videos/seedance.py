@@ -23,14 +23,24 @@ from litellm.types.videos.main import (
 from litellm.types.videos.utils import encode_video_id_with_provider
 from litellm.videos.capabilities import CapabilityParamSupport, DeclaredCapabilityParams
 
-from ..common_utils import EMPTY_JSON_OBJECT, JsonValue, SeeGenError, error_from_http_response, parse_json_mapping
+from ..common_utils import (
+    EMPTY_JSON_OBJECT,
+    AsyncHTTPClient,
+    JsonValue,
+    SeeGenError,
+    SyncHTTPClient,
+    error_from_http_response,
+    parse_json_mapping,
+)
 from .base import SeeGenVideoConfig
 from .frames import resolve_frame_media
 from .models import model_name, video_family
 from .seedance_parameters import (
     CAPABILITIES,
     IGNORED_STANDARD_PARAMS,
+    INPUT_VIDEO_SECONDS,
     SUPPORTED_PARAMS,
+    input_video_seconds,
     map_seedance_params,
     media_urls,
 )
@@ -40,6 +50,7 @@ _STRING_LIST_ADAPTER: Final = TypeAdapter(list[str])
 _JSON_LIST_ADAPTER: Final = TypeAdapter(list[JsonValue])
 _EMPTY_REQUEST_FILES: Final = TypeAdapter(list[tuple[str, str]]).validate_python(())
 _CANCEL_NOT_FOUND: Final = VideoCancelRefusal(reason="not_found", message="SeeGen has no Seedance task with this id")
+_VIDEO_INPUT_TIER_SUFFIX: Final = "_video_input"
 
 
 class _VideoURL(BaseModel):
@@ -125,7 +136,59 @@ def _failure_message(task: _TaskResponse) -> str:
     return f"Seedance task ended with status {task.status}"
 
 
+def _positive_seconds(value: JsonValue | None) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
+def _has_video_input(request_data: Mapping[str, JsonValue]) -> bool:
+    content: Final = request_data.get("content")
+    return isinstance(content, list) and any(
+        isinstance(item, dict) and item.get("type") == "video_url" for item in content
+    )
+
+
+def _billed_usage(request_data: Mapping[str, JsonValue], input_seconds: float | None) -> Mapping[str, JsonValue]:
+    """Ark bills a request that carries video on (input + output) seconds at its with-video token rate.
+
+    The usage reports those combined seconds under a ``<tier>_video_input`` tier so the deployment's
+    ``output_cost_per_second_<tier>_video_input`` pin prices them. An edit renders at the source's own
+    length (``duration: -1``), so its output seconds are the input's. Without a length hint the input is
+    assumed to be as long as the output.
+    """
+    video_input: Final = _has_video_input(request_data)
+    requested: Final = _positive_seconds(request_data.get("duration"))
+    output_seconds: Final = requested if requested is not None else input_seconds if video_input else None
+    billed_seconds: Final = (
+        None
+        if output_seconds is None
+        else output_seconds + (input_seconds if input_seconds is not None else output_seconds)
+        if video_input
+        else output_seconds
+    )
+    resolution: Final = request_data.get("resolution")
+    duration_usage: Final[Mapping[str, JsonValue]] = (
+        MappingProxyType({"duration_seconds": billed_seconds}) if billed_seconds is not None else EMPTY_JSON_OBJECT
+    )
+    resolution_usage: Final[Mapping[str, JsonValue]] = (
+        MappingProxyType({"video_resolution": resolution.lower() + (_VIDEO_INPUT_TIER_SUFFIX if video_input else "")})
+        if isinstance(resolution, str)
+        else EMPTY_JSON_OBJECT
+    )
+    return MappingProxyType({**duration_usage, **resolution_usage})
+
+
 class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
+    def __init__(
+        self,
+        model: str | None = None,
+        sync_client: SyncHTTPClient | None = None,
+        async_client: AsyncHTTPClient | None = None,
+    ) -> None:
+        super().__init__(model, sync_client, async_client)
+        self._input_video_seconds: float | None = None
+
     def get_supported_openai_params(self, model: str) -> list[str]:  # mutable-ok: BaseVideoConfig requires a list
         video_family(model)
         return _STRING_LIST_ADAPTER.validate_python(SUPPORTED_PARAMS | IGNORED_STANDARD_PARAMS)
@@ -210,11 +273,12 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
         media_keys: Final = frozenset(
             {"image_url", "end_image_url", "input_reference", "image_urls", "video_urls", "audio_urls"}
         )
+        self._input_video_seconds = input_video_seconds(params.get(INPUT_VIDEO_SECONDS))
         forwarded: Final[Mapping[str, JsonValue]] = MappingProxyType(
             {
                 key: value
                 for key, value in params.items()
-                if key not in IGNORED_STANDARD_PARAMS and key not in media_keys
+                if key not in IGNORED_STANDARD_PARAMS and key not in media_keys and key != INPUT_VIDEO_SECONDS
             }
         )
         request_data: Final = parse_json_mapping(
@@ -244,19 +308,9 @@ class SeeGenSeedanceVideoConfig(SeeGenVideoConfig):
             if raw_status in frozenset({"queued", "running"})
             else raw_status
         )
-        duration: Final = request_data.get("duration") if request_data is not None else None
-        resolution: Final = request_data.get("resolution") if request_data is not None else None
-        duration_usage: Final[Mapping[str, JsonValue]] = (
-            MappingProxyType({"duration_seconds": float(duration)})
-            if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration > 0
-            else EMPTY_JSON_OBJECT
+        usage: Final = parse_json_mapping(
+            _billed_usage(request_data if request_data is not None else EMPTY_JSON_OBJECT, self._input_video_seconds)
         )
-        resolution_usage: Final[Mapping[str, JsonValue]] = (
-            MappingProxyType({"video_resolution": resolution.lower()})
-            if isinstance(resolution, str)
-            else EMPTY_JSON_OBJECT
-        )
-        usage: Final = parse_json_mapping(MappingProxyType({**duration_usage, **resolution_usage}))
         video_id: Final = (
             encode_video_id_with_provider(submitted.id, custom_llm_provider, self._model)
             if custom_llm_provider

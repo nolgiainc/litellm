@@ -1510,3 +1510,128 @@ def test_dashscope_cancel_refused(status_response, cancel_response, reason, meth
 
     assert result.reason == reason
     assert [method for method, _ in calls] == methods
+
+
+def _create_usage(
+    params: dict[str, JsonValue], *, model: str = SEEDANCE_MODEL
+) -> tuple[dict[str, JsonValue], JsonValue]:
+    config = SeeGenSeedanceVideoConfig(model)
+    body, _files, _url = _transform_create(config, model, "Same take, a second camera", params)
+    video = config.transform_video_create_response(
+        model=model,
+        raw_response=_response({"id": "cgt-usage"}),
+        logging_obj=Mock(),
+        custom_llm_provider="seegen",
+        request_data=body,
+    )
+    return body, video.usage
+
+
+def test_seedance_reference_video_bills_input_plus_output_seconds_on_the_with_video_tier() -> None:
+    body, usage = _create_usage(
+        {
+            "video_urls": ["https://example.com/take.mp4"],
+            "seconds": 12,
+            "resolution": "720p",
+            "input_video_seconds": 12.04,
+        }
+    )
+
+    assert "input_video_seconds" not in body
+    assert usage == {"duration_seconds": 24.04, "video_resolution": "720p_video_input"}
+
+
+def test_seedance_reference_video_without_a_length_assumes_it_matches_the_output() -> None:
+    _body, usage = _create_usage({"video_urls": ["https://example.com/take.mp4"], "seconds": 8, "resolution": "1080p"})
+
+    assert usage == {"duration_seconds": 16.0, "video_resolution": "1080p_video_input"}
+
+
+def test_seedance_edit_bills_the_source_length_as_both_input_and_output() -> None:
+    body, usage = _create_usage(
+        {
+            "video_urls": ["https://example.com/source.mp4"],
+            "omni_reference_task_type": "edit",
+            "resolution": "720p",
+            "input_video_seconds": 5,
+        }
+    )
+
+    assert body["duration"] == -1
+    assert usage == {"duration_seconds": 10.0, "video_resolution": "720p_video_input"}
+
+
+def test_seedance_without_video_input_keeps_the_output_seconds_and_plain_tier() -> None:
+    _body, usage = _create_usage(
+        {
+            "image_urls": ["https://example.com/character.png"],
+            "seconds": 5,
+            "resolution": "720p",
+            "input_video_seconds": 5,
+        }
+    )
+
+    assert usage == {"duration_seconds": 5.0, "video_resolution": "720p"}
+
+
+@pytest.mark.parametrize("value", [0, -3, True, "12"])
+def test_seedance_refuses_an_input_video_length_that_is_not_positive_seconds(value: JsonValue) -> None:
+    with pytest.raises(SeeGenError) as error:
+        _create_usage({"video_urls": ["https://example.com/take.mp4"], "seconds": 5, "input_video_seconds": value})
+
+    assert error.value.status_code == 400
+    assert "input_video_seconds must be a positive number of seconds" in str(error.value)
+
+
+def test_seedance_with_video_usage_is_priced_by_the_deployment_video_input_pin() -> None:
+    from litellm.llms.openai.cost_calculation import video_generation_cost
+
+    _body, usage = _create_usage(
+        {"video_urls": ["https://example.com/take.mp4"], "seconds": 12, "resolution": "720p", "input_video_seconds": 12}
+    )
+    assert isinstance(usage, dict)
+    duration = usage["duration_seconds"]
+    resolution = usage["video_resolution"]
+    assert isinstance(duration, float) and isinstance(resolution, str)
+
+    cost = video_generation_cost(
+        model=f"seegen/{SEEDANCE_MODEL}",
+        duration_seconds=duration,
+        custom_llm_provider="seegen",
+        model_info={
+            "output_cost_per_second": 0.5734286,
+            "output_cost_per_second_720p": 0.2331429,
+            "output_cost_per_second_720p_video_input": 0.1394571,
+        },
+        video_resolution=resolution,
+    )
+
+    assert cost == pytest.approx(0.1394571 * 24)
+
+
+def test_public_video_generation_keeps_the_input_video_length_out_of_the_ark_body() -> None:
+    def route(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "input_video_seconds" not in body
+        assert body["content"][1] == {
+            "type": "video_url",
+            "video_url": {"url": "https://example.com/take.mp4"},
+            "role": "reference_video",
+        }
+        return httpx.Response(200, json={"id": "cgt-hint"}, request=request)
+
+    client = HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(route)))
+
+    video = litellm.video_generation(
+        prompt="Same take, a second camera",
+        model=f"seegen/{SEEDANCE_MODEL}",
+        seconds="12",
+        video_urls=["https://example.com/take.mp4"],
+        input_video_seconds=12,
+        resolution="720p",
+        api_key="test-key",
+        client=client,
+        timeout=1,
+    )
+
+    assert video.usage == {"duration_seconds": 24.0, "video_resolution": "720p_video_input"}
