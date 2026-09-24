@@ -1574,6 +1574,14 @@ def test_seedance_without_video_input_keeps_the_output_seconds_and_plain_tier() 
     assert usage == {"duration_seconds": 5.0, "video_resolution": "720p"}
 
 
+def test_seedance_bills_a_short_reference_at_arks_input_minimum() -> None:
+    _body, usage = _create_usage(
+        {"video_urls": ["https://example.com/clip.mp4"], "seconds": 4, "resolution": "480p", "input_video_seconds": 2}
+    )
+
+    assert usage == {"duration_seconds": 7.0, "video_resolution": "480p_video_input"}
+
+
 @pytest.mark.parametrize("value", [0, -3, True, "12"])
 def test_seedance_refuses_an_input_video_length_that_is_not_positive_seconds(value: JsonValue) -> None:
     with pytest.raises(SeeGenError) as error:
